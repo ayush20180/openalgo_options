@@ -1,14 +1,13 @@
 {
-    "strategy_name": "Strangle",
-    "enabled": true,
+    "strategy_name": "Strangle_Standalone",
     "index": "NIFTY",
     "exchange": "NFO",
     "product_type": "MIS",
     "quantity_in_lots": 1,
     "mode": "PAPER",
-    "start_time": "08:40",
-    "end_time": "08:42",
-    "run_intraday": true,
+    "start_time": "09:30",
+    "end_time": "15:10",
+    "monitoring_interval_seconds": 60,
     "expiry_type": "Weekly",
     "strike_difference": {
         "NIFTY": 200,
