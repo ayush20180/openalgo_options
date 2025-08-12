@@ -1,0 +1,26 @@
+{
+    "strategy_name": "Strangle",
+    "enabled": true,
+    "index": "NIFTY",
+    "exchange": "NFO",
+    "product_type": "MIS",
+    "quantity_in_lots": 1,
+    "mode": "PAPER",
+    "start_time": "08:40",
+    "end_time": "08:42",
+    "run_intraday": true,
+    "expiry_type": "Weekly",
+    "strike_difference": {
+        "NIFTY": 200,
+        "BANKNIFTY": 500
+    },
+    "strike_interval": {
+        "NIFTY": 50,
+        "BANKNIFTY": 100
+    },
+    "adjustment": {
+        "enabled": true,
+        "threshold_ratio": 0.5,
+        "strike_search_radius": 20
+    }
+}
