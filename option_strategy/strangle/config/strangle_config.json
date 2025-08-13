@@ -26,5 +26,9 @@
         "max_adjustments": 5,
         "threshold_ratio": 0.5,
         "strike_search_radius": 20
+    },
+    "websocket": {
+        "poll_interval_fallback": 1,
+        "websocket_max_retries": 5
     }
 }

@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from ..common_utils.logger import setup_logger
 from ..common_utils.state_manager import StateManager
 from ..common_utils.trade_journal import TradeJournal
+from ..common_utils.websocket_manager import WebSocketManager
 
 class StrangleStrategy:
     """
@@ -40,6 +41,18 @@ class StrangleStrategy:
         self.state = self.state_manager.load_state(self.strategy_name, self.mode)
 
         self._setup_api_client()
+
+        # Initialize WebSocket Manager
+        self.websocket_manager = WebSocketManager(
+            strategy_name=self.strategy_name,
+            api_key=self.api_key,
+            host_url=self.host_server,
+            logger=self.logger,
+            api_caller=self._make_api_request, # Pass the request method for fallback
+            config=self.config
+        )
+        self.live_prices = {} # To store the latest tick prices
+
         self._sym_rx = re.compile(r"^[A-Z]+(\d{2}[A-Z]{3}\d{2})(\d+)(CE|PE)$")
         self.logger.info("Strategy initialized", extra={'event': 'INFO'})
 
@@ -76,21 +89,39 @@ class StrangleStrategy:
         end_time = time_obj.fromisoformat(self.config['end_time'])
         ist = pytz.timezone("Asia/Kolkata")
 
-        while True:
-            now_ist = datetime.now(ist).time()
-            if start_time <= now_ist < end_time:
-                if not self.state.get('active_trade_id'):
-                    self.execute_entry()
-                self.monitor_and_adjust()
-            elif now_ist >= end_time:
-                if self.state.get('active_trade_id'):
-                    self.execute_exit()
-                self.logger.info("Trading window ended. Exiting.", extra={'event': 'INFO'})
-                break
-            else:
-                self.logger.info(f"Waiting for trading window. Current time: {now_ist.strftime('%H:%M:%S')} IST", extra={'event': 'INFO'})
+        # Wait until the start time
+        while datetime.now(ist).time() < start_time:
+            self.logger.info(f"Waiting for trading window to start at {self.config['start_time']} IST.", extra={'event': 'INFO'})
+            time.sleep(30)
 
-            time.sleep(self.config.get("monitoring_interval_seconds", 60))
+        self.logger.info("Trading window has started.", extra={'event': 'INFO'})
+
+        # If there's no active trade, execute entry now
+        if not self.state.get('active_trade_id'):
+            self.execute_entry()
+
+        # Start the WebSocket stream for monitoring if there are active legs
+        if self.state.get('active_legs'):
+            initial_symbols = [leg['symbol'] for leg in self.state['active_legs'].values()]
+            # Also subscribe to the underlying index
+            initial_symbols.append(self.config['index'])
+
+            # The format for websocket subscription is SYMBOL.EXCHANGE
+            initial_topics = [f"{s}.{self.config['exchange']}" if "NIFTY" not in s else f"{s}.NSE_INDEX" for s in initial_symbols]
+
+            self.websocket_manager.start_stream(initial_topics, self._on_tick)
+            self.logger.info(f"Started WebSocket stream, monitoring {initial_topics}", extra={'event': 'WEBSOCKET'})
+        else:
+            self.logger.warning("No active legs to monitor. Exiting.", extra={'event': 'INFO'})
+            return
+
+        # Keep the main thread alive until the end of the trading day
+        while datetime.now(ist).time() < end_time:
+            time.sleep(60)
+
+        # Once the loop exits, it's the end of the day
+        self.execute_exit()
+        self.logger.info("Trading window ended. Strategy has been stopped.", extra={'event': 'INFO'})
 
     def execute_entry(self):
         self.logger.info("Attempting new trade entry.", extra={'event': 'ENTRY'})
@@ -124,6 +155,19 @@ class StrangleStrategy:
         except Exception as e:
             self.logger.error(f"Error during entry: {e}", extra={'event': 'ERROR'}, exc_info=True)
 
+    def _on_tick(self, tick_data):
+        """Callback function to handle incoming ticks from the WebSocket."""
+        symbol = tick_data.get('symbol')
+        ltp = tick_data.get('ltp')
+
+        if symbol and ltp:
+            self.live_prices[symbol] = ltp
+
+            # Only trigger adjustment logic if we have prices for both legs
+            active_symbols = [leg['symbol'] for leg in self.state['active_legs'].values()]
+            if all(s in self.live_prices for s in active_symbols):
+                self.monitor_and_adjust()
+
     def monitor_and_adjust(self):
         if not self.state.get('active_trade_id') or not self.config['adjustment']['enabled'] or len(self.state['active_legs']) != 2:
             return
@@ -135,19 +179,19 @@ class StrangleStrategy:
                 self.state['max_adjustments_logged'] = True
             return
 
-        self.logger.info("Monitoring position.", extra={'event': 'INFO'})
+        self.logger.debug("Checking for adjustment.", extra={'event': 'INFO'})
 
         try:
             ce_leg = self.state['active_legs'].get('CALL_SHORT')
             pe_leg = self.state['active_legs'].get('PUT_SHORT')
             if not ce_leg or not pe_leg: return
 
-            ce_quote = self._make_api_request('POST', 'quotes', {"symbol": ce_leg['symbol'], "exchange": self.config['exchange']})
-            pe_quote = self._make_api_request('POST', 'quotes', {"symbol": pe_leg['symbol'], "exchange": self.config['exchange']})
-            if ce_quote.get('status') != 'success' or pe_quote.get('status') != 'success': return
+            ce_price = self.live_prices.get(ce_leg['symbol'])
+            pe_price = self.live_prices.get(pe_leg['symbol'])
 
-            ce_price, pe_price = ce_quote['data']['ltp'], pe_quote['data']['ltp']
-            self.logger.info(f"Monitoring prices: {ce_leg['symbol']}@{ce_price}, {pe_leg['symbol']}@{pe_price}", extra={'event': 'INFO'})
+            if ce_price is None or pe_price is None:
+                self.logger.warning("Live prices not available for both legs. Skipping adjustment check.", extra={'event': 'INFO'})
+                return
 
             threshold = self.config['adjustment']['threshold_ratio']
             losing_leg_type, winning_leg_price = (None, None)
@@ -168,6 +212,10 @@ class StrangleStrategy:
 
     def _perform_adjustment(self, losing_leg_type: str, target_premium: float):
         losing_leg_info = self.state['active_legs'][losing_leg_type]
+
+        # Unsubscribe from the old leg's price feed
+        self.websocket_manager.unsubscribe([f"{losing_leg_info['symbol']}.{self.config['exchange']}"])
+
         self._square_off_leg(losing_leg_type, losing_leg_info, is_adjustment=True)
 
         remaining_leg_type = 'PUT_SHORT' if losing_leg_type == 'CALL_SHORT' else 'CALL_SHORT'
@@ -189,6 +237,9 @@ class StrangleStrategy:
 
         self.logger.info(f"Found new leg: {new_leg_info['symbol']}. Placing order.", extra={'event': 'ADJUSTMENT'})
         self._place_leg_order(losing_leg_type, new_leg_info['symbol'], new_leg_info['strike'], "SELL", is_adjustment=True)
+
+        # Subscribe to the new leg's price feed
+        self.websocket_manager.subscribe([f"{new_leg_info['symbol']}.{self.config['exchange']}"])
 
     async def _find_new_leg(self, option_type: str, target_premium: float) -> dict:
         ot = "CE" if "CALL" in option_type else "PE"
