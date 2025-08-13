@@ -94,10 +94,10 @@ class BaseStrategy:
         return self._make_api_request('POST', 'placeorder', {
             "symbol": symbol,
             "action": action,
-            "quantity": quantity,
+            "quantity": str(quantity), # Server expects quantity as a string
             "product": product_type,
             "exchange": exchange,
-            "price_type": "MARKET",
+            "pricetype": "MARKET", # Correct key is 'pricetype' not 'price_type'
             "strategy": self.config.get("strategy_name")
         })
 
