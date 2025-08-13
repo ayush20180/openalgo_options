@@ -95,8 +95,9 @@ class StrangleStrategy(BaseStrategy):
             order_res = self.place_order(symbol, action, total_quantity, product, exchange)
             if order_res.get('status') == 'success':
                 if action == "SELL":
-                    self.active_legs[leg_type] = {'symbol': symbol, 'strike': strike, 'order_id': order_res['data']['order_id'], 'status': 'OPEN'}
-                self.logger.info(f"Successfully placed LIVE order for {symbol}.")
+                    # Correctly parse the orderid from the top level of the response
+                    self.active_legs[leg_type] = {'symbol': symbol, 'strike': strike, 'order_id': order_res.get('orderid'), 'status': 'OPEN'}
+                self.logger.info(f"Successfully placed LIVE order for {symbol}. Order ID: {order_res.get('orderid')}")
             else:
                 self.logger.error(f"Failed to place LIVE order for {symbol}: {order_res}")
 
