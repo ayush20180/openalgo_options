@@ -1,5 +1,5 @@
 {
-    "strategy_name": "Strangle_Standalone",
+    "strategy_name": "strangle",
     "index": "NIFTY",
     "exchange": "NFO",
     "product_type": "MIS",
@@ -23,6 +23,7 @@
     },
     "adjustment": {
         "enabled": true,
+        "max_adjustments": 5,
         "threshold_ratio": 0.5,
         "strike_search_radius": 20
     }
