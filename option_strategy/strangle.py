@@ -2,6 +2,7 @@ import json
 import time
 from datetime import datetime, time as time_obj
 import asyncio
+import pytz
 
 from .base_strategy import BaseStrategy
 
@@ -227,23 +228,33 @@ class StrangleStrategy(BaseStrategy):
         """
         self.logger.info(f"Starting Strangle Strategy: {self.config.get('strategy_name')}")
 
+        try:
+            ist_timezone = pytz.timezone("Asia/Kolkata")
+        except pytz.exceptions.UnknownTimeZoneError:
+            self.logger.error("Could not find timezone 'Asia/Kolkata'. Please ensure pytz is installed correctly.")
+            return
+
         start_time = time_obj.fromisoformat(self.config['start_time'])
         end_time = time_obj.fromisoformat(self.config['end_time'])
 
-        while True:
-            now = datetime.now().time()
+        self.logger.info(f"Strategy will run between {self.config['start_time']} and {self.config['end_time']} IST.")
 
-            if start_time <= now < end_time:
+        while True:
+            now_ist = datetime.now(ist_timezone).time()
+
+            if start_time <= now_ist < end_time:
                 if not self.entry_executed:
                     self.execute_entry()
                     self.entry_executed = True
 
                 self.monitor_and_adjust()
 
-            elif now >= end_time:
+            elif now_ist >= end_time:
                 if self.active_legs:
                     self.execute_exit()
-                self.logger.info("Strategy run finished for the day.")
+                self.logger.info("Trading window has ended. Exiting strategy.")
                 break
+            else:
+                self.logger.info(f"Current time {now_ist.strftime('%H:%M:%S')} is outside the trading window. Waiting...")
 
             time.sleep(self.config.get("monitoring_interval_seconds", 60))
