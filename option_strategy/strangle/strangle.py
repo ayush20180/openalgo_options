@@ -64,9 +64,19 @@ class StrangleStrategy:
         self.logger.info(f"Starting Strategy", extra={'event': 'INFO'})
 
         if self.state.get('active_trade_id'):
-            self.logger.info(f"Resuming trade with ID: {self.state['active_trade_id']}", extra={'event': 'INFO'})
-        else:
-            self.state = {'active_trade_id': None, 'active_legs': {}, 'adjustment_count': 0}
+            # Check if the mode from the state matches the current config mode
+            if self.state.get('mode') != self.config.get('mode'):
+                self.logger.warning(
+                    f"Mode has changed from {self.state.get('mode')} to {self.config.get('mode')}. "
+                    "Discarding previous state and starting fresh.",
+                    extra={'event': 'INFO'}
+                )
+                self.state = {} # Reset state
+            else:
+                self.logger.info(f"Resuming trade with ID: {self.state['active_trade_id']} in {self.state.get('mode')} mode.", extra={'event': 'INFO'})
+
+        if not self.state.get('active_trade_id'):
+            self.state = {'active_trade_id': None, 'active_legs': {}, 'adjustment_count': 0, 'mode': self.config.get('mode')}
             self.logger.info("No active trade found. Waiting for entry time.", extra={'event': 'INFO'})
 
         start_time = time_obj.fromisoformat(self.config['start_time'])
@@ -231,7 +241,8 @@ class StrangleStrategy:
         for leg_type, leg_info in list(self.state['active_legs'].items()):
             self._square_off_leg(leg_type, leg_info, is_adjustment=False)
 
-        self.state = {'active_trade_id': None, 'active_legs': {}, 'adjustment_count': 0}
+        # Reset state to empty, the run loop will re-initialize it with the correct mode
+        self.state = {}
         self.state_manager.save_state(self.strategy_name, self.state)
         self.logger.info("Trade closed and state reset.", extra={'event': 'EXIT'})
 
