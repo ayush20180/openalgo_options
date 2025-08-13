@@ -69,7 +69,6 @@ class StrangleStrategy:
         if self.state.get('active_trade_id'):
             self.logger.info(f"Resuming trade with ID: {self.state['active_trade_id']} in mode {self.mode}", extra={'event': 'INFO'})
         else:
-            # Initialize a fresh state if no active trade is loaded
             self.state = {'active_trade_id': None, 'active_legs': {}, 'adjustment_count': 0, 'mode': self.mode}
             self.logger.info("No active trade found. Waiting for entry time.", extra={'event': 'INFO'})
 
@@ -97,7 +96,6 @@ class StrangleStrategy:
         self.logger.info("Attempting new trade entry.", extra={'event': 'ENTRY'})
 
         try:
-            # [Full entry logic from previous implementation]
             index_symbol = self.config['index']
             expiry_res = self._make_api_request('POST', 'expiry', {"symbol": index_symbol, "exchange": self.config['exchange'], "instrumenttype": 'options'})
             if expiry_res.get('status') != 'success': return
@@ -114,9 +112,9 @@ class StrangleStrategy:
             ce_strike, pe_strike = atm_strike + strike_diff, atm_strike - strike_diff
             ce_symbol, pe_symbol = f"{index_symbol}{formatted_expiry}{ce_strike}CE", f"{index_symbol}{formatted_expiry}{pe_strike}PE"
 
-            # Start of a new trade lifecycle
             self.state['active_trade_id'] = self.journal.generate_trade_id()
             self.state['adjustment_count'] = 0
+            self.state['mode'] = self.mode # Ensure mode is in the state
             self.logger.info(f"New trade started with ID: {self.state['active_trade_id']}", extra={'event': 'ENTRY'})
 
             self._place_leg_order("CALL_SHORT", ce_symbol, ce_strike, "SELL", is_adjustment=False)
@@ -183,7 +181,6 @@ class StrangleStrategy:
             return
 
         new_strike = new_leg_info['strike']
-        # Inversion Check
         if (losing_leg_type == 'PUT_SHORT' and remaining_leg_strike < new_strike) or \
            (losing_leg_type == 'CALL_SHORT' and new_strike < remaining_leg_strike):
             self.logger.error(f"Adjustment would cause inverted strangle. Squaring off all positions.", extra={'event': 'EXIT'})
@@ -194,7 +191,6 @@ class StrangleStrategy:
         self._place_leg_order(losing_leg_type, new_leg_info['symbol'], new_leg_info['strike'], "SELL", is_adjustment=True)
 
     async def _find_new_leg(self, option_type: str, target_premium: float) -> dict:
-        # option_type will be 'CALL_SHORT' or 'PUT_SHORT', need to extract CE/PE
         ot = "CE" if "CALL" in option_type else "PE"
 
         index_symbol = self.config['index']
@@ -235,7 +231,6 @@ class StrangleStrategy:
         for leg_type, leg_info in list(self.state['active_legs'].items()):
             self._square_off_leg(leg_type, leg_info, is_adjustment=False)
 
-        # Reset state to empty, the run loop will re-initialize it with the correct mode
         self.state = {}
         self.state_manager.save_state(self.strategy_name, self.mode, self.state)
         self.logger.info("Trade closed and state reset.", extra={'event': 'EXIT'})
@@ -253,7 +248,6 @@ class StrangleStrategy:
             order_res = self._make_api_request('POST', 'placeorder', payload)
             if order_res.get('status') == 'success':
                 order_id = order_res.get('orderid')
-                # For live, we can't get execution price immediately from this call, assuming 0 for now.
                 self.journal.record_trade(self.state['active_trade_id'], order_id, action, symbol, total_quantity, 0, leg_type, is_adjustment, mode)
                 if action == "SELL": self.state['active_legs'][leg_type] = {'symbol': symbol, 'strike': strike}
             else:
@@ -273,7 +267,6 @@ class StrangleStrategy:
         self._place_leg_order(leg_type, leg_info['symbol'], leg_info['strike'], "BUY", is_adjustment=is_adjustment)
         self.state['active_legs'].pop(leg_type, None)
 
-    # --- API Helper methods ---
     def _make_api_request(self, method: str, endpoint: str, payload: dict = None):
         url = f"{self.host_server}/api/v1/{endpoint}"
         req_payload = payload or {}
@@ -287,5 +280,3 @@ class StrangleStrategy:
         except requests.exceptions.RequestException as e:
             self.logger.error(f"API request to {endpoint} failed: {e}", extra={'event': 'ERROR'})
             return {"status": "error", "message": str(e)}
-
-    # ... [The complex adjustment logic will be added in a subsequent step to keep this manageable] ...
