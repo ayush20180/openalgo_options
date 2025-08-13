@@ -13,13 +13,14 @@ class EventFilter(logging.Filter):
             record.event = record.levelname
         return True
 
-def setup_logger(strategy_name, log_path):
+def setup_logger(strategy_name, log_path, mode: str):
     """
-    Sets up a logger for a specific strategy that writes to a daily log file.
+    Sets up a logger for a specific strategy that writes to a daily, mode-specific log file.
 
     Args:
-        strategy_name (str): The name of the strategy, used in the log file name.
+        strategy_name (str): The name of the strategy.
         log_path (str): The directory where log files should be stored.
+        mode (str): The trading mode ('LIVE' or 'PAPER').
 
     Returns:
         logging.Logger: A configured logger instance.
@@ -30,8 +31,8 @@ def setup_logger(strategy_name, log_path):
     # Use IST for timestamps
     ist_timezone = pytz.timezone("Asia/Kolkata")
 
-    # Generate a dynamic log file name with the current date in IST
-    log_file_name = f"{strategy_name}_{datetime.now(ist_timezone).strftime('%Y-%m-%d')}.log"
+    # Generate a dynamic, mode-specific log file name
+    log_file_name = f"{strategy_name}_{mode.lower()}_{datetime.now(ist_timezone).strftime('%Y-%m-%d')}.log"
     log_file_path = os.path.join(log_path, log_file_name)
 
     # Create a logger

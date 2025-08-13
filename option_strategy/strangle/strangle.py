@@ -27,14 +27,17 @@ class StrangleStrategy:
         self.state_path = os.path.join(self.base_path, 'state')
         self.trades_path = os.path.join(self.base_path, 'trades')
 
-        # Initialize utilities
-        self.logger = setup_logger(self.strategy_name, self.log_path)
-        self.state_manager = StateManager(self.state_path)
-        self.journal = TradeJournal(self.strategy_name, self.trades_path)
-
-        # Load config and state
+        # Load config first to get the mode
         self._load_config()
-        self.state = self.state_manager.load_state(self.strategy_name)
+        self.mode = self.config.get('mode', 'PAPER')
+
+        # Initialize utilities with mode
+        self.logger = setup_logger(self.strategy_name, self.log_path, self.mode)
+        self.state_manager = StateManager(self.state_path)
+        self.journal = TradeJournal(self.strategy_name, self.trades_path, self.mode)
+
+        # Load state for the current mode
+        self.state = self.state_manager.load_state(self.strategy_name, self.mode)
 
         self._setup_api_client()
         self._sym_rx = re.compile(r"^[A-Z]+(\d{2}[A-Z]{3}\d{2})(\d+)(CE|PE)$")
@@ -64,19 +67,10 @@ class StrangleStrategy:
         self.logger.info(f"Starting Strategy", extra={'event': 'INFO'})
 
         if self.state.get('active_trade_id'):
-            # Check if the mode from the state matches the current config mode
-            if self.state.get('mode') != self.config.get('mode'):
-                self.logger.warning(
-                    f"Mode has changed from {self.state.get('mode')} to {self.config.get('mode')}. "
-                    "Discarding previous state and starting fresh.",
-                    extra={'event': 'INFO'}
-                )
-                self.state = {} # Reset state
-            else:
-                self.logger.info(f"Resuming trade with ID: {self.state['active_trade_id']} in {self.state.get('mode')} mode.", extra={'event': 'INFO'})
-
-        if not self.state.get('active_trade_id'):
-            self.state = {'active_trade_id': None, 'active_legs': {}, 'adjustment_count': 0, 'mode': self.config.get('mode')}
+            self.logger.info(f"Resuming trade with ID: {self.state['active_trade_id']} in mode {self.mode}", extra={'event': 'INFO'})
+        else:
+            # Initialize a fresh state if no active trade is loaded
+            self.state = {'active_trade_id': None, 'active_legs': {}, 'adjustment_count': 0, 'mode': self.mode}
             self.logger.info("No active trade found. Waiting for entry time.", extra={'event': 'INFO'})
 
         start_time = time_obj.fromisoformat(self.config['start_time'])
@@ -128,7 +122,7 @@ class StrangleStrategy:
             self._place_leg_order("CALL_SHORT", ce_symbol, ce_strike, "SELL", is_adjustment=False)
             self._place_leg_order("PUT_SHORT", pe_symbol, pe_strike, "SELL", is_adjustment=False)
 
-            self.state_manager.save_state(self.strategy_name, self.state)
+            self.state_manager.save_state(self.strategy_name, self.mode, self.state)
         except Exception as e:
             self.logger.error(f"Error during entry: {e}", extra={'event': 'ERROR'}, exc_info=True)
 
@@ -169,7 +163,7 @@ class StrangleStrategy:
                 self.logger.info(f"Adjustment triggered for {losing_leg_type} leg.", extra={'event': 'ADJUSTMENT'})
                 self.state['adjustment_count'] += 1
                 self._perform_adjustment(losing_leg_type, winning_leg_price)
-                self.state_manager.save_state(self.strategy_name, self.state)
+                self.state_manager.save_state(self.strategy_name, self.mode, self.state)
 
         except Exception as e:
             self.logger.error(f"Error during adjustment: {e}", extra={'event': 'ERROR'}, exc_info=True)
@@ -243,7 +237,7 @@ class StrangleStrategy:
 
         # Reset state to empty, the run loop will re-initialize it with the correct mode
         self.state = {}
-        self.state_manager.save_state(self.strategy_name, self.state)
+        self.state_manager.save_state(self.strategy_name, self.mode, self.state)
         self.logger.info("Trade closed and state reset.", extra={'event': 'EXIT'})
 
     def _place_leg_order(self, leg_type: str, symbol: str, strike: int, action: str, is_adjustment: bool):

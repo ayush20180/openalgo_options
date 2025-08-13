@@ -5,21 +5,23 @@ import uuid
 
 class TradeJournal:
     """
-    Manages the trade journal for a strategy, writing all trades to a CSV file.
+    Manages the trade journal for a strategy, writing all trades to a mode-specific CSV file.
     """
 
-    def __init__(self, strategy_name: str, trades_path: str):
+    def __init__(self, strategy_name: str, trades_path: str, mode: str):
         """
         Initializes the TradeJournal.
 
         Args:
             strategy_name (str): The name of the strategy.
             trades_path (str): The directory where trade CSV files should be stored.
+            mode (str): The trading mode ('LIVE' or 'PAPER').
         """
         self.strategy_name = strategy_name
         self.trades_path = trades_path
+        self.mode = mode
         os.makedirs(self.trades_path, exist_ok=True)
-        self.csv_path = os.path.join(self.trades_path, f"{self.strategy_name}_trades.csv")
+        self.csv_path = os.path.join(self.trades_path, f"{self.strategy_name}_{self.mode.lower()}_trades.csv")
         self.columns = [
             'trade_id', 'order_id', 'timestamp_ist', 'action', 'symbol',
             'quantity', 'price', 'leg_type', 'is_adjustment', 'mode'
