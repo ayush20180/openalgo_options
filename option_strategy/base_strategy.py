@@ -29,9 +29,7 @@ class BaseStrategy:
             config_path (str): Path to the JSON config file.
             paper_trade_log_path (str): Path to the CSV file for logging paper trades.
         """
-        # Construct the path to the .env file in the root directory
-        dotenv_path = os.path.join(os.path.dirname(__file__), '..', '.env')
-        load_dotenv(dotenv_path=dotenv_path)
+        load_dotenv(override=True)
 
         self.api_key = os.getenv("APP_KEY")
         self.host_server = os.getenv("HOST_SERVER")
