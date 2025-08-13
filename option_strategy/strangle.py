@@ -81,14 +81,18 @@ class StrangleStrategy(BaseStrategy):
     def _place_leg_order(self, leg_type: str, symbol: str, strike: int, action: str):
         """Helper function to place an order for a single leg."""
         mode = self.config['mode']
-        quantity = self.config['quantity_in_lots']
         product = self.config['product_type']
         exchange = self.config['exchange']
 
-        self.logger.info(f"Placing {action} {leg_type} order for {symbol} in {mode} mode.")
+        # Calculate the total quantity in shares
+        lots = self.config['quantity_in_lots']
+        lot_size = self.config['lot_size'][self.config['index']]
+        total_quantity = lots * lot_size
+
+        self.logger.info(f"Placing {action} {leg_type} order for {symbol} ({lots} lots / {total_quantity} shares) in {mode} mode.")
 
         if mode == 'LIVE':
-            order_res = self.place_order(symbol, action, quantity, product, exchange)
+            order_res = self.place_order(symbol, action, total_quantity, product, exchange)
             if order_res.get('status') == 'success':
                 if action == "SELL":
                     self.active_legs[leg_type] = {'symbol': symbol, 'strike': strike, 'order_id': order_res['data']['order_id'], 'status': 'OPEN'}
@@ -103,7 +107,7 @@ class StrangleStrategy(BaseStrategy):
                 return
 
             price = quote_res['data']['ltp']
-            self.log_paper_trade(symbol, action, quantity, price)
+            self.log_paper_trade(symbol, action, total_quantity, price)
             if action == "SELL":
                 self.active_legs[leg_type] = {'symbol': symbol, 'strike': strike, 'order_id': f'paper_{int(time.time())}', 'status': 'OPEN', 'entry_price': price}
 

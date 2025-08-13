@@ -17,6 +17,10 @@
         "NIFTY": 50,
         "BANKNIFTY": 100
     },
+    "lot_size": {
+        "NIFTY": 50,
+        "BANKNIFTY": 15
+    },
     "adjustment": {
         "enabled": true,
         "threshold_ratio": 0.5,
