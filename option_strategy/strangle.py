@@ -43,7 +43,8 @@ class StrangleStrategy(BaseStrategy):
             self.logger.info(f"Using expiry: {formatted_expiry}")
 
             # 2. Get ATM Strike
-            quote_res = self.get_quote(symbol=index_symbol, exchange=f"{exchange}_INDEX")
+            # The underlying index (e.g., NIFTY) is on the NSE exchange.
+            quote_res = self.get_quote(symbol=index_symbol, exchange="NSE_INDEX")
             if quote_res.get('status') != 'success':
                 self.logger.error(f"Could not fetch quote for {index_symbol}. Halting entry.")
                 return
