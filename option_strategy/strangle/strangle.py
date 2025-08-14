@@ -187,9 +187,31 @@ class StrangleStrategy:
         if self.state['adjustment_count'] >= max_adjustments: return
 
         threshold = self.config['adjustment']['threshold_ratio']
-        if ce_price < pe_price * threshold or pe_price < ce_price * threshold:
-            losing_leg_type = 'CALL_SHORT' if ce_price < pe_price else 'PUT_SHORT'
-            winning_leg_price = pe_price if ce_price < pe_price else ce_price
+
+        # Clarify logic by finding smaller and larger price first
+        if ce_price < pe_price:
+            smaller_price, larger_price = ce_price, pe_price
+            smaller_leg, larger_leg = 'CALL_SHORT', 'PUT_SHORT'
+        else:
+            smaller_price, larger_price = pe_price, ce_price
+            smaller_leg, larger_leg = 'PUT_SHORT', 'CALL_SHORT'
+
+        trigger_value = larger_price * threshold
+        is_triggered = smaller_price < trigger_value
+
+        # Add detailed diagnostic logging
+        self.logger.info(
+            f"Diagnostics: Smaller Leg ({smaller_leg}@{smaller_price}) | "
+            f"Larger Leg ({larger_leg}@{larger_price}) | "
+            f"Threshold ({threshold}) | Trigger Value ({trigger_value:.2f}) | "
+            f"Condition: {smaller_price:.2f} < {trigger_value:.2f} | "
+            f"Triggered: {is_triggered}",
+            extra={'event': 'DEBUG'}
+        )
+
+        if is_triggered:
+            losing_leg_type = smaller_leg
+            winning_leg_price = larger_price
             self.logger.info(f"Adjustment triggered for {losing_leg_type} leg.", extra={'event': 'ADJUSTMENT'})
             self.state['adjustment_count'] += 1
             self._perform_adjustment(losing_leg_type, winning_leg_price)
