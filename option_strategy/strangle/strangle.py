@@ -206,7 +206,7 @@ class StrangleStrategy:
             f"Threshold ({threshold}) | Trigger Value ({trigger_value:.2f}) | "
             f"Condition: {smaller_price:.2f} < {trigger_value:.2f} | "
             f"Triggered: {is_triggered}",
-            extra={'event': 'DEBUG'}
+            extra={'event': 'INFO'}
         )
 
         if is_triggered:
