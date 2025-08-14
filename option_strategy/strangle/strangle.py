@@ -88,19 +88,12 @@ class StrangleStrategy:
 
     def _start_monitoring(self):
         try:
-            self.client.connect(on_connect=self._on_connect, on_error=self._on_ws_error)
-            self.logger.info("WebSocket connecting...", extra={'event': 'WEBSOCKET'})
+            self.client.connect()
+            self.logger.info("WebSocket connected successfully.", extra={'event': 'WEBSOCKET'})
+            self._manage_subscriptions()
         except Exception as e:
-            self.logger.error(f"WebSocket initial connection failed: {e}. Switching to fallback.", extra={'event': 'ERROR'})
+            self.logger.error(f"WebSocket connection failed: {e}. Switching to fallback.", extra={'event': 'ERROR'})
             self._start_fallback_poll()
-
-    def _on_connect(self):
-        self.logger.info("WebSocket connected. Subscribing to symbols.", extra={'event': 'WEBSOCKET'})
-        self._manage_subscriptions()
-
-    def _on_ws_error(self, error):
-        self.logger.error(f"WebSocket error: {error}. Switching to fallback.", extra={'event': 'ERROR'})
-        self._start_fallback_poll()
 
     def _start_fallback_poll(self):
         import threading
