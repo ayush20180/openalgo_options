@@ -167,21 +167,29 @@ class StrangleStrategy:
     def _on_tick(self, data):
         symbol = data.get('symbol')
         ltp = data.get('ltp')
-        if symbol and ltp:
+        if symbol and ltp is not None:
+            self.logger.info(f"Tick received: {symbol} @ {ltp}", extra={'event': 'INFO'})
             self.live_prices[symbol] = ltp
             self.monitor_and_adjust()
 
     def monitor_and_adjust(self):
+        self.logger.info("Entering monitor_and_adjust", extra={'event': 'INFO'})
+
         if not self.state.get('active_trade_id') or not self.config['adjustment']['enabled'] or len(self.state['active_legs']) != 2:
+            self.logger.info(f"Guard fail: Trade active? {self.state.get('active_trade_id')}, Adjust enabled? {self.config['adjustment']['enabled']}, Leg count: {len(self.state['active_legs'])}", extra={'event': 'INFO'})
             return
 
         ce_leg = self.state['active_legs'].get('CALL_SHORT')
         pe_leg = self.state['active_legs'].get('PUT_SHORT')
-        if not ce_leg or not pe_leg: return
+        if not ce_leg or not pe_leg:
+            self.logger.info(f"Guard fail: CE leg exists? {bool(ce_leg)}, PE leg exists? {bool(pe_leg)}", extra={'event': 'INFO'})
+            return
 
         ce_price = self.live_prices.get(ce_leg['symbol'])
         pe_price = self.live_prices.get(pe_leg['symbol'])
-        if ce_price is None or pe_price is None: return
+        if ce_price is None or pe_price is None:
+            self.logger.info(f"Guard fail: CE price found? {ce_price is not None}, PE price found? {pe_price is not None}. Live prices: {self.live_prices}", extra={'event': 'INFO'})
+            return
 
         max_adjustments = self.config['adjustment'].get('max_adjustments', 5)
         if self.state['adjustment_count'] >= max_adjustments: return
