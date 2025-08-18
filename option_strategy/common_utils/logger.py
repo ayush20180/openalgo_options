@@ -71,9 +71,4 @@ def setup_logger(strategy_name, log_path, mode: str):
     logger.addHandler(file_handler)
     logger.addFilter(EventFilter())
 
-    # Also add a console handler for immediate feedback
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
-
     return logger

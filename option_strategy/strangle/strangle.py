@@ -166,11 +166,16 @@ class StrangleStrategy:
 
     def _on_tick(self, data):
         self.logger.info(f"Tick received: {data}", extra={'event': 'DEBUG'})
-        symbol = data.get('symbol')
-        ltp = data.get('ltp')
-        if symbol and ltp is not None:
-            self.live_prices[symbol] = ltp
-            self.monitor_and_adjust()
+        try:
+            symbol = data.get('symbol')
+            # The ltp is nested inside a 'data' dictionary in the tick
+            ltp = data.get('data', {}).get('ltp')
+
+            if symbol and ltp is not None:
+                self.live_prices[symbol] = ltp
+                self.monitor_and_adjust()
+        except Exception as e:
+            self.logger.error(f"Error processing tick: {data} | Error: {e}", extra={'event': 'ERROR'})
 
     def monitor_and_adjust(self):
         self.logger.info(f"Entering monitor_and_adjust. State: {self.state}, Live Prices: {self.live_prices}", extra={'event': 'DEBUG'})
