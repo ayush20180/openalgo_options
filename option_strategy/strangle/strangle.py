@@ -175,6 +175,13 @@ class StrangleStrategy:
             self.logger.error(f"Error processing tick: {data} | Error: {e}", extra={'event': 'ERROR'})
 
     def monitor_and_adjust(self):
+        # Time check guard clause
+        now_ist = datetime.now(pytz.timezone("Asia/Kolkata")).time()
+        start_time = time_obj.fromisoformat(self.config['start_time'])
+        end_time = time_obj.fromisoformat(self.config['end_time'])
+        if not (start_time <= now_ist < end_time):
+            return
+
         if not self.state.get('active_trade_id') or not self.config['adjustment']['enabled'] or len(self.state['active_legs']) != 2:
             return
 
@@ -279,8 +286,12 @@ class StrangleStrategy:
         return best_leg
 
     def execute_exit(self, reason="Scheduled Exit"):
-        if self.client and self.client.is_connected():
-            self.client.disconnect()
+        try:
+            if self.client:
+                self.client.disconnect()
+        except Exception as e:
+            self.logger.warning(f"Error during WebSocket disconnect (may be already closed): {e}", extra={'event': 'WEBSOCKET'})
+
         self.logger.info(f"Closing trade {self.state.get('active_trade_id')} due to: {reason}", extra={'event': 'EXIT'})
         for leg_type, leg_info in list(self.state['active_legs'].items()):
             self._square_off_leg(leg_type, leg_info, is_adjustment=False)
