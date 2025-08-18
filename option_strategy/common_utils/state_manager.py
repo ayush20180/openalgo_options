@@ -1,5 +1,6 @@
 import json
 import os
+import logging
 
 class StateManager:
     """
@@ -41,7 +42,7 @@ class StateManager:
             with open(state_file, 'r') as f:
                 return json.load(f)
         except (json.JSONDecodeError, IOError) as e:
-            print(f"Warning: Could not load state file for {strategy_name} ({mode}): {e}")
+            logging.warning(f"Could not load state file for {strategy_name} ({mode}): {e}")
             return {}
 
     def save_state(self, strategy_name: str, mode: str, state_data: dict):
@@ -62,5 +63,5 @@ class StateManager:
                 json.dump(state_data, f, indent=4)
             return True
         except IOError as e:
-            print(f"Error: Could not save state file for {strategy_name} ({mode}): {e}")
+            logging.error(f"Could not save state file for {strategy_name} ({mode}): {e}")
             return False

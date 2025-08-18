@@ -165,30 +165,30 @@ class StrangleStrategy:
             self.logger.error(f"Error during entry: {e}", extra={'event': 'ERROR'}, exc_info=True)
 
     def _on_tick(self, data):
+        self.logger.info(f"Tick received: {data}", extra={'event': 'DEBUG'})
         symbol = data.get('symbol')
         ltp = data.get('ltp')
         if symbol and ltp is not None:
-            self.logger.info(f"Tick received: {symbol} @ {ltp}", extra={'event': 'INFO'})
             self.live_prices[symbol] = ltp
             self.monitor_and_adjust()
 
     def monitor_and_adjust(self):
-        self.logger.info("Entering monitor_and_adjust", extra={'event': 'INFO'})
+        self.logger.info(f"Entering monitor_and_adjust. State: {self.state}, Live Prices: {self.live_prices}", extra={'event': 'DEBUG'})
 
         if not self.state.get('active_trade_id') or not self.config['adjustment']['enabled'] or len(self.state['active_legs']) != 2:
-            self.logger.info(f"Guard fail: Trade active? {self.state.get('active_trade_id')}, Adjust enabled? {self.config['adjustment']['enabled']}, Leg count: {len(self.state['active_legs'])}", extra={'event': 'INFO'})
+            self.logger.info(f"Guard fail 1", extra={'event': 'DEBUG'})
             return
 
         ce_leg = self.state['active_legs'].get('CALL_SHORT')
         pe_leg = self.state['active_legs'].get('PUT_SHORT')
         if not ce_leg or not pe_leg:
-            self.logger.info(f"Guard fail: CE leg exists? {bool(ce_leg)}, PE leg exists? {bool(pe_leg)}", extra={'event': 'INFO'})
+            self.logger.info(f"Guard fail 2", extra={'event': 'DEBUG'})
             return
 
         ce_price = self.live_prices.get(ce_leg['symbol'])
         pe_price = self.live_prices.get(pe_leg['symbol'])
         if ce_price is None or pe_price is None:
-            self.logger.info(f"Guard fail: CE price found? {ce_price is not None}, PE price found? {pe_price is not None}. Live prices: {self.live_prices}", extra={'event': 'INFO'})
+            self.logger.info(f"Guard fail 3", extra={'event': 'DEBUG'})
             return
 
         max_adjustments = self.config['adjustment'].get('max_adjustments', 5)
@@ -196,36 +196,30 @@ class StrangleStrategy:
 
         threshold = self.config['adjustment']['threshold_ratio']
 
-        # Clarify logic by finding smaller and larger price first
         if ce_price < pe_price:
-            smaller_price, larger_price = ce_price, pe_price
-            smaller_leg, larger_leg = 'CALL_SHORT', 'PUT_SHORT'
+            smaller_price, larger_price, smaller_leg = ce_price, pe_price, 'CALL_SHORT'
         else:
-            smaller_price, larger_price = pe_price, ce_price
-            smaller_leg, larger_leg = 'PUT_SHORT', 'CALL_SHORT'
+            smaller_price, larger_price, smaller_leg = pe_price, ce_price, 'PUT_SHORT'
 
         trigger_value = larger_price * threshold
         is_triggered = smaller_price < trigger_value
 
-        # Add detailed diagnostic logging
         self.logger.info(
-            f"Diagnostics: Smaller Leg ({smaller_leg}@{smaller_price}) | "
-            f"Larger Leg ({larger_leg}@{larger_price}) | "
-            f"Threshold ({threshold}) | Trigger Value ({trigger_value:.2f}) | "
-            f"Condition: {smaller_price:.2f} < {trigger_value:.2f} | "
+            f"Diagnostics: Smaller Leg ({smaller_leg}@{smaller_price:.2f}) | "
+            f"Larger Price ({larger_price:.2f}) | Threshold ({threshold}) | "
+            f"Trigger Value ({trigger_value:.2f}) | Condition: {smaller_price:.2f} < {trigger_value:.2f} | "
             f"Triggered: {is_triggered}",
             extra={'event': 'INFO'}
         )
 
         if is_triggered:
-            losing_leg_type = smaller_leg
-            winning_leg_price = larger_price
-            self.logger.info(f"Adjustment triggered for {losing_leg_type} leg.", extra={'event': 'ADJUSTMENT'})
+            self.logger.info(f"Adjustment triggered for {smaller_leg} leg.", extra={'event': 'ADJUSTMENT'})
             self.state['adjustment_count'] += 1
-            self._perform_adjustment(losing_leg_type, winning_leg_price)
+            self._perform_adjustment(smaller_leg, larger_price)
             self.state_manager.save_state(self.strategy_name, self.mode, self.state)
 
     def _perform_adjustment(self, losing_leg_type: str, target_premium: float):
+        self.logger.info(f"Performing adjustment for {losing_leg_type}", extra={'event': 'DEBUG'})
         losing_leg_info = self.state['active_legs'][losing_leg_type]
         self._manage_subscriptions(unsubscribe_list=[{"exchange": self.config['exchange'], "symbol": losing_leg_info['symbol']}])
         self._square_off_leg(losing_leg_type, losing_leg_info, is_adjustment=True)
@@ -249,6 +243,7 @@ class StrangleStrategy:
 
     async def _find_new_leg(self, option_type: str, target_premium: float) -> dict:
         ot = "CE" if "CALL" in option_type else "PE"
+        self.logger.info(f"Finding new {ot} leg near premium {target_premium}", extra={'event': 'DEBUG'})
         index_symbol = self.config['index']
         quote_res = self._make_api_request('POST', 'quotes', {"symbol": index_symbol, "exchange": "NSE_INDEX"})
         spot_price = quote_res['data']['ltp']
@@ -263,16 +258,27 @@ class StrangleStrategy:
         expiry_str = m.group(1)
 
         symbols_to_check = [f"{index_symbol}{expiry_str}{k}{ot}" for k in strikes_to_check]
+        self.logger.info(f"Checking {len(symbols_to_check)} strikes for new leg.", extra={'event': 'DEBUG'})
 
         tasks = [asyncio.to_thread(self._make_api_request, 'POST', 'quotes', {"symbol": s, "exchange": self.config['exchange']}) for s in symbols_to_check]
         results = await asyncio.gather(*tasks)
 
         successful_quotes = []
-        for res in results:
+        for res, symbol in zip(results, symbols_to_check):
             if res and res.get('status') == 'success':
-                successful_quotes.append(res['data'])
+                data = res['data']
+                data['symbol'] = symbol
+                m = self._sym_rx.match(symbol)
+                if m: data['strike'] = int(m.group(2))
+                successful_quotes.append(data)
 
-        return min(successful_quotes, key=lambda q: abs(q['ltp'] - target_premium)) if successful_quotes else None
+        if not successful_quotes:
+            self.logger.warning("Could not fetch any quotes for new leg.", extra={'event': 'DEBUG'})
+            return None
+
+        best_leg = min(successful_quotes, key=lambda q: abs(q['ltp'] - target_premium))
+        self.logger.info(f"Found best new leg: {best_leg['symbol']} with price {best_leg['ltp']}", extra={'event': 'DEBUG'})
+        return best_leg
 
     def execute_exit(self, reason="Scheduled Exit"):
         if self.client and self.client.is_connected():
