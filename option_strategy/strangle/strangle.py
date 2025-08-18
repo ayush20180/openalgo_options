@@ -70,21 +70,40 @@ class StrangleStrategy:
         end_time = time_obj.fromisoformat(self.config['end_time'])
         ist = pytz.timezone("Asia/Kolkata")
 
-        while datetime.now(ist).time() < start_time:
-            self.logger.info(f"Waiting for trading window to start at {self.config['start_time']} IST.", extra={'event': 'INFO'})
-            time.sleep(30)
+        # This is the main lifecycle loop for the strategy script
+        while True:
+            now_ist = datetime.now(ist).time()
 
-        if not self.state.get('active_trade_id'):
-            self.execute_entry()
+            # --- Before Trading Window ---
+            if now_ist < start_time:
+                self.logger.info(f"Waiting for trading window to start at {start_time.strftime('%H:%M:%S')}.", extra={'event': 'INFO'})
+                # Sleep until the window starts, with a small buffer
+                wait_seconds = (datetime.combine(datetime.now(ist).date(), start_time) - datetime.now(ist)).total_seconds()
+                time.sleep(max(1, wait_seconds))
+                continue
 
-        if self.state.get('active_legs'):
-            self._start_monitoring()
+            # --- During Trading Window ---
+            if start_time <= now_ist < end_time:
+                # Place entry trade if there isn't one
+                if not self.state.get('active_trade_id'):
+                    self.execute_entry()
+                    # After entry, start monitoring
+                    if self.state.get('active_legs'):
+                        self._start_monitoring()
 
-        while datetime.now(ist).time() < end_time:
-            time.sleep(60)
+                # Main thread will now just wait while the WebSocket thread handles monitoring.
+                # We can add a health check here later if needed.
+                time.sleep(60)
+                continue
 
-        self.execute_exit()
-        self.logger.info("Trading window ended. Strategy stopped.", extra={'event': 'INFO'})
+            # --- After Trading Window ---
+            if now_ist >= end_time:
+                self.logger.info("Trading window has ended.", extra={'event': 'INFO'})
+                if self.state.get('active_trade_id'):
+                    self.execute_exit()
+                else:
+                    self.logger.info("No active trade to exit. Shutting down.", extra={'event': 'INFO'})
+                break # Exit the main while loop and terminate the script
 
     def _start_monitoring(self):
         try:
