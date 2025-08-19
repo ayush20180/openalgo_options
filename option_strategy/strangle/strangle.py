@@ -38,7 +38,6 @@ class StrangleStrategy:
         self._setup_api_client()
 
         self.live_prices = {}
-        self.subscription_queue = queue.Queue()
         self._sym_rx = re.compile(r"^[A-Z]+(\d{2}[A-Z]{3}\d{2})(\d+)(CE|PE)$")
         self.logger.info("Strategy initialized", extra={'event': 'INFO'})
 
@@ -68,6 +67,18 @@ class StrangleStrategy:
         self.logger.info("Run - Checkpoint 1: Starting Strategy", extra={'event': 'DEBUG'})
         if not self.state.get('active_trade_id'):
             self.state = {'active_trade_id': None, 'active_legs': {}, 'adjustment_count': 0, 'is_adjusting': False, 'mode': self.mode}
+        else:
+            # If strategy was stopped mid-adjustment, reset the flag
+            if self.state.get('is_adjusting'):
+                self.logger.warning("Resetting 'is_adjusting' flag to False on startup.")
+                self.state['is_adjusting'] = False
+                self.state_manager.save_state(self.strategy_name, self.mode, self.state)
+
+            # If there are active legs from a previous session, start monitoring them
+            if self.state.get('active_legs'):
+                self.logger.info("Active legs found on startup. Resuming monitoring.")
+                self._start_monitoring()
+
         self.logger.info(f"Run - Checkpoint 2: Initial state: {self.state}", extra={'event': 'DEBUG'})
 
         start_time = time_obj.fromisoformat(self.config['start_time'])
@@ -181,7 +192,6 @@ class StrangleStrategy:
     def _on_tick(self, data):
         self.logger.info(f"Tick received: {data}", extra={'event': 'DEBUG'})
         try:
-            self._process_subscription_queue()
             symbol = data.get('symbol')
             ltp = data.get('data', {}).get('ltp')
             if symbol and ltp is not None:
@@ -191,16 +201,6 @@ class StrangleStrategy:
         except Exception as e:
             self.logger.error(f"Error processing tick: {data} | Error: {e}", extra={'event': 'ERROR'})
 
-    def _process_subscription_queue(self):
-        if not self.subscription_queue.empty():
-            self.logger.info("Processing subscription queue.", extra={'event': 'DEBUG'})
-            try:
-                message = self.subscription_queue.get_nowait()
-                self._manage_subscriptions(unsubscribe_list=message.get('unsubscribe'), subscribe_list=message.get('subscribe'))
-            except queue.Empty:
-                pass
-            except Exception as e:
-                self.logger.error(f"Error processing subscription queue: {e}", extra={'event': 'ERROR'})
 
     def monitor_and_adjust(self):
         self.logger.info(f"Monitor: state={self.state}, prices={self.live_prices}", extra={'event': 'DEBUG'})
@@ -252,10 +252,18 @@ class StrangleStrategy:
 
     def _perform_adjustment(self, losing_leg_type: str, target_premium: float):
         self.logger.info(f"Performing adjustment for {losing_leg_type}", extra={'event': 'DEBUG'})
-        losing_leg_info = self.state['active_legs'][losing_leg_type]
+        losing_leg_info = self.state['active_legs'][losing_leg_type].copy()
         self._square_off_leg(losing_leg_type, losing_leg_info, is_adjustment=True)
 
         remaining_leg_type = 'PUT_SHORT' if losing_leg_type == 'CALL_SHORT' else 'CALL_SHORT'
+
+        if remaining_leg_type not in self.state['active_legs']:
+            self.logger.error(f"Remaining leg {remaining_leg_type} not found after squaring off. Exiting.", extra={'event': 'ERROR'})
+            self.execute_exit("Remaining leg missing post-adjustment")
+            self.state['is_adjusting'] = False
+            self.state_manager.save_state(self.strategy_name, self.mode, self.state)
+            return
+
         remaining_leg_strike = self.state['active_legs'][remaining_leg_type]['strike']
 
         new_leg_info = asyncio.run(self._find_new_leg(losing_leg_type, target_premium))
@@ -275,11 +283,11 @@ class StrangleStrategy:
 
         self._place_leg_order(losing_leg_type, new_leg_info['symbol'], new_leg_info['strike'], "SELL", is_adjustment=True)
 
-        sub_message = {
-            'unsubscribe': [{"exchange": self.config['exchange'], "symbol": losing_leg_info['symbol']}],
-            'subscribe': [{"exchange": self.config['exchange'], "symbol": new_leg_info['symbol']}]
-        }
-        self.subscription_queue.put(sub_message)
+        # Directly manage subscriptions instead of using the queue
+        self.logger.info("Directly updating subscriptions post-adjustment.", extra={'event': 'DEBUG'})
+        unsubscribe_list = [{"exchange": self.config['exchange'], "symbol": losing_leg_info['symbol']}]
+        subscribe_list = [{"exchange": self.config['exchange'], "symbol": new_leg_info['symbol']}]
+        self._manage_subscriptions(unsubscribe_list=unsubscribe_list, subscribe_list=subscribe_list)
 
         self.state['is_adjusting'] = False
         self.state_manager.save_state(self.strategy_name, self.mode, self.state)
@@ -333,10 +341,30 @@ class StrangleStrategy:
         self.state_manager.save_state(self.strategy_name, self.mode, self.state)
 
     def shutdown(self, reason="Manual shutdown"):
-        self.logger.info(f"Shutting down WebSocket. Reason: {reason}", extra={'event': 'INFO'})
+        self.logger.info(f"Shutting down strategy. Reason: {reason}", extra={'event': 'INFO'})
         try:
-            if self.client: self.client.disconnect()
-        except Exception: pass
+            if self.client:
+                unsubscribe_list = []
+                # Check for active legs in state and build the unsubscribe list
+                if self.state and self.state.get('active_legs'):
+                    symbols = [leg['symbol'] for leg in self.state['active_legs'].values()]
+                    instrument_list = [{"exchange": self.config['exchange'], "symbol": s} for s in symbols]
+                    unsubscribe_list.extend(instrument_list)
+
+                # Also unsubscribe from the index if it was being monitored
+                if self.config.get('index'):
+                    unsubscribe_list.append({"exchange": "NSE_INDEX", "symbol": self.config['index']})
+
+                if unsubscribe_list:
+                    self.logger.info(f"Unsubscribing from all symbols: {unsubscribe_list}", extra={'event': 'WEBSOCKET'})
+                    self._manage_subscriptions(unsubscribe_list=unsubscribe_list)
+                    time.sleep(1) # Give it a moment to process
+
+                self.client.disconnect()
+                self.logger.info("WebSocket client disconnected successfully.", extra={'event': 'INFO'})
+
+        except Exception as e:
+            self.logger.error(f"An error occurred during shutdown: {e}", exc_info=True, extra={'event': 'ERROR'})
 
     def _place_leg_order(self, leg_type: str, symbol: str, strike: int, action: str, is_adjustment: bool):
         mode = self.config['mode']
