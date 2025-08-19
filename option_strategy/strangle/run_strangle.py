@@ -8,9 +8,15 @@ strategy = None
 
 def graceful_shutdown(signal, frame):
     """Signal handler for Ctrl+C."""
-    print("\nCtrl+C detected. Shutting down gracefully...")
+    print("\nCtrl+C detected. Initiating graceful shutdown...")
     if strategy:
+        # Assuming strategy has a logger configured
+        strategy.logger.info("DIAGNOSTIC: Ctrl+C detected. Calling strategy.shutdown().", extra={'event': 'SHUTDOWN'})
         strategy.shutdown()
+        strategy.logger.info("DIAGNOSTIC: strategy.shutdown() completed.", extra={'event': 'SHUTDOWN'})
+    else:
+        print("Strategy object not found. Exiting immediately.")
+    print("Exiting.")
     sys.exit(0)
 
 if __name__ == "__main__":
