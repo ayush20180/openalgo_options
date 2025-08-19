@@ -71,33 +71,35 @@ class StrangleStrategy:
         self.logger.info(f"Run - Checkpoint 2: Initial state: {self.state}", extra={'event': 'DEBUG'})
 
         start_time = time_obj.fromisoformat(self.config['start_time'])
+        self.logger.info("Run - Checkpoint 3: Parsed start_time", extra={'event': 'DEBUG'})
         end_time = time_obj.fromisoformat(self.config['end_time'])
+        self.logger.info("Run - Checkpoint 4: Parsed end_time", extra={'event': 'DEBUG'})
         ist = pytz.timezone("Asia/Kolkata")
-        self.logger.info("Run - Checkpoint 3: Time objects created", extra={'event': 'DEBUG'})
+        self.logger.info("Run - Checkpoint 5: Timezone set", extra={'event': 'DEBUG'})
 
         while True:
-            self.logger.info("Run - Checkpoint 4: Top of main loop", extra={'event': 'DEBUG'})
+            self.logger.info("Run - Checkpoint 6: Top of main loop", extra={'event': 'DEBUG'})
             now_ist = datetime.now(ist).time()
 
             if now_ist < start_time:
                 wait_seconds = (datetime.combine(datetime.now(ist).date(), start_time) - datetime.now(ist)).total_seconds()
                 self.logger.info(f"Waiting for trading window. Sleeping for {wait_seconds:.2f} seconds.", extra={'event': 'INFO'})
-                time.sleep(max(1, wait_seconds + 1)) # Add 1s buffer
+                if wait_seconds > 0: time.sleep(wait_seconds)
                 continue
 
             if start_time <= now_ist < end_time:
-                self.logger.info("Run - Checkpoint 5: Inside trading window", extra={'event': 'DEBUG'})
+                self.logger.info("Run - Checkpoint 8: Inside trading window", extra={'event': 'DEBUG'})
                 if not self.state.get('active_trade_id'):
                     self.execute_entry()
                     if self.state.get('active_legs'):
                         self._start_monitoring()
 
-                self.logger.info("Run - Checkpoint 6: Main thread sleeping", extra={'event': 'DEBUG'})
+                self.logger.info("Run - Checkpoint 9: Main thread sleeping", extra={'event': 'DEBUG'})
                 time.sleep(60)
                 continue
 
             if now_ist >= end_time:
-                self.logger.info("Run - Checkpoint 7: After trading window", extra={'event': 'DEBUG'})
+                self.logger.info("Run - Checkpoint 10: After trading window", extra={'event': 'DEBUG'})
                 self.execute_exit()
                 break
 
@@ -145,8 +147,35 @@ class StrangleStrategy:
             self.logger.info(f"Initial subscription to: {instrument_list}", extra={'event': 'WEBSOCKET'})
 
     def execute_entry(self):
-        # ... (Same as before) ...
-        pass
+        self.logger.info("Attempting new trade entry.", extra={'event': 'ENTRY'})
+        try:
+            index_symbol = self.config['index']
+            expiry_res = self._make_api_request('POST', 'expiry', {"symbol": index_symbol, "exchange": self.config['exchange'], "instrumenttype": 'options'})
+            if expiry_res.get('status') != 'success': return
+            expiry_date = expiry_res['data'][0]
+            formatted_expiry = datetime.strptime(expiry_date, '%d-%b-%y').strftime('%d%b%y').upper()
+
+            quote_res = self._make_api_request('POST', 'quotes', {"symbol": index_symbol, "exchange": "NSE_INDEX"})
+            if quote_res.get('status') != 'success': return
+            spot_price = quote_res['data']['ltp']
+            strike_interval = self.config['strike_interval'][index_symbol]
+            atm_strike = int(round(spot_price / strike_interval) * strike_interval)
+
+            strike_diff = self.config['strike_difference'][index_symbol]
+            ce_strike, pe_strike = atm_strike + strike_diff, atm_strike - strike_diff
+            ce_symbol, pe_symbol = f"{index_symbol}{formatted_expiry}{ce_strike}CE", f"{index_symbol}{formatted_expiry}{pe_strike}PE"
+
+            self.state['active_trade_id'] = self.journal.generate_trade_id()
+            self.state['adjustment_count'] = 0
+
+            self.logger.info(f"New trade started with ID: {self.state['active_trade_id']}", extra={'event': 'ENTRY'})
+
+            self._place_leg_order("CALL_SHORT", ce_symbol, ce_strike, "SELL", is_adjustment=False)
+            self._place_leg_order("PUT_SHORT", pe_symbol, pe_strike, "SELL", is_adjustment=False)
+
+            self.state_manager.save_state(self.strategy_name, self.mode, self.state)
+        except Exception as e:
+            self.logger.error(f"Error during entry: {e}", extra={'event': 'ERROR'}, exc_info=True)
 
     def _on_tick(self, data):
         self.logger.info(f"Tick received: {data}", extra={'event': 'DEBUG'})
@@ -174,22 +203,93 @@ class StrangleStrategy:
 
     def monitor_and_adjust(self):
         self.logger.info(f"Monitor: state={self.state}, prices={self.live_prices}", extra={'event': 'DEBUG'})
-        # ... (Same logic as before, with the "exit on max adjustments" feature) ...
-        pass
+        now_ist = datetime.now(pytz.timezone("Asia/Kolkata")).time()
+        start_time = time_obj.fromisoformat(self.config['start_time'])
+        end_time = time_obj.fromisoformat(self.config['end_time'])
+        if not (start_time <= now_ist < end_time):
+            self.logger.info(f"Monitor guard fail: Outside trading window.", extra={'event': 'DEBUG'})
+            return
+
+        if self.state.get('is_adjusting'):
+            self.logger.info("Monitor guard fail: Already adjusting.", extra={'event': 'DEBUG'})
+            return
+
+        if not self.state.get('active_trade_id') or not self.config['adjustment']['enabled'] or len(self.state['active_legs']) != 2:
+            self.logger.info(f"Monitor guard fail: Trade active? {bool(self.state.get('active_trade_id'))}, Adjust enabled? {self.config['adjustment']['enabled']}, Leg count: {len(self.state['active_legs'])}", extra={'event': 'DEBUG'})
+            return
+
+        ce_leg = self.state['active_legs'].get('CALL_SHORT')
+        pe_leg = self.state['active_legs'].get('PUT_SHORT')
+        if not ce_leg or not pe_leg:
+            self.logger.info(f"Monitor guard fail: CE leg exists? {bool(ce_leg)}, PE leg exists? {bool(pe_leg)}", extra={'event': 'DEBUG'})
+            return
+
+        ce_price = self.live_prices.get(ce_leg['symbol'])
+        pe_price = self.live_prices.get(pe_leg['symbol'])
+        if ce_price is None or pe_price is None:
+            self.logger.info(f"Monitor guard fail: CE price? {ce_price}, PE price? {pe_price}", extra={'event': 'DEBUG'})
+            return
+
+        if ce_price < pe_price:
+            smaller_price, larger_price, smaller_leg = ce_price, pe_price, 'CALL_SHORT'
+        else:
+            smaller_price, larger_price, smaller_leg = pe_price, ce_price, 'PUT_SHORT'
+
+        threshold = self.config['adjustment']['threshold_ratio']
+        if smaller_price < larger_price * threshold:
+            max_adjustments = self.config['adjustment'].get('max_adjustments', 5)
+            if self.state['adjustment_count'] < max_adjustments:
+                self.logger.info(f"Adjustment triggered for {smaller_leg} leg. Prices: {smaller_price:.2f} < {larger_price:.2f} * {threshold:.2f}", extra={'event': 'ADJUSTMENT'})
+                self.state['is_adjusting'] = True
+                self.state['adjustment_count'] += 1
+                self.state_manager.save_state(self.strategy_name, self.mode, self.state)
+                adj_thread = threading.Thread(target=self._perform_adjustment, args=(smaller_leg, larger_price), daemon=True)
+                adj_thread.start()
+            else:
+                self.logger.warning(f"Max adjustments reached. Squaring off position.", extra={'event': 'EXIT'})
+                self.execute_exit("Max adjustments reached")
 
     def _perform_adjustment(self, losing_leg_type: str, target_premium: float):
         self.logger.info(f"Performing adjustment for {losing_leg_type}", extra={'event': 'DEBUG'})
-        # ... (Same logic as before, putting message on queue) ...
-        pass
+        losing_leg_info = self.state['active_legs'][losing_leg_type]
+        self._square_off_leg(losing_leg_type, losing_leg_info, is_adjustment=True)
+
+        remaining_leg_type = 'PUT_SHORT' if losing_leg_type == 'CALL_SHORT' else 'CALL_SHORT'
+        remaining_leg_strike = self.state['active_legs'][remaining_leg_type]['strike']
+
+        new_leg_info = asyncio.run(self._find_new_leg(losing_leg_type, target_premium))
+        if not new_leg_info:
+            self.logger.error("Failed to find new leg. Exiting trade.", extra={'event': 'ERROR'})
+            self.execute_exit("Failed to find adjustment leg")
+            self.state['is_adjusting'] = False
+            self.state_manager.save_state(self.strategy_name, self.mode, self.state)
+            return
+
+        new_strike = new_leg_info['strike']
+        if (losing_leg_type == 'PUT_SHORT' and remaining_leg_strike < new_strike) or \
+           (losing_leg_type == 'CALL_SHORT' and new_strike < remaining_leg_strike):
+            self.logger.error("Inverted strangle condition met. Exiting trade.", extra={'event': 'ERROR'})
+            self.execute_exit("Inverted strangle condition")
+            return
+
+        self._place_leg_order(losing_leg_type, new_leg_info['symbol'], new_leg_info['strike'], "SELL", is_adjustment=True)
+
+        sub_message = {
+            'unsubscribe': [{"exchange": self.config['exchange'], "symbol": losing_leg_info['symbol']}],
+            'subscribe': [{"exchange": self.config['exchange'], "symbol": new_leg_info['symbol']}]
+        }
+        self.subscription_queue.put(sub_message)
+
+        self.state['is_adjusting'] = False
+        self.state_manager.save_state(self.strategy_name, self.mode, self.state)
 
     async def _find_new_leg(self, option_type: str, target_premium: float):
-        self.logger.info(f"Finding new leg for {option_type}", extra={'event': 'DEBUG'})
-        # ... (Same logic as before) ...
+        # ... (Same as before) ...
         pass
 
     def execute_exit(self, reason="Scheduled Exit"):
-        self.logger.info(f"Executing exit. Reason: {reason}", extra={'event': 'EXIT'})
-        self.shutdown()
+        self.shutdown(reason=f"Exiting Trade: {reason}")
+        self.logger.info(f"Closing trade {self.state.get('active_trade_id')} due to: {reason}", extra={'event': 'EXIT'})
         for leg_type, leg_info in list(self.state['active_legs'].items()):
             self._square_off_leg(leg_type, leg_info, is_adjustment=False)
         self.state = {}
@@ -201,4 +301,14 @@ class StrangleStrategy:
             if self.client: self.client.disconnect()
         except Exception: pass
 
-    # ... (All other helper methods) ...
+    def _place_leg_order(self, leg_type: str, symbol: str, strike: int, action: str, is_adjustment: bool):
+        # ... (Same as before) ...
+        pass
+
+    def _square_off_leg(self, leg_type: str, leg_info: dict, is_adjustment: bool):
+        # ... (Same as before) ...
+        pass
+
+    def _make_api_request(self, method: str, endpoint: str, payload: dict = None):
+        # ... (Same as before) ...
+        pass
