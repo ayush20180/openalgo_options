@@ -16,6 +16,7 @@ from openalgo import api
 from ..common_utils.logger import setup_logger
 from ..common_utils.state_manager import StateManager
 from ..common_utils.trade_journal import TradeJournal
+from ..common_utils.websocket_manager import WebSocketManager
 
 class StrangleStrategy:
     def __init__(self, strategy_name: str):
@@ -35,7 +36,21 @@ class StrangleStrategy:
         self.journal = TradeJournal(self.strategy_name, self.trades_path, self.mode)
         self.state = self.state_manager.load_state(self.strategy_name, self.mode)
 
-        self._setup_api_client()
+        dotenv_path = os.path.join(os.path.dirname(__file__), '..', '..', '.env')
+        load_dotenv(dotenv_path=dotenv_path, override=True)
+        self.api_key = os.getenv("APP_KEY")
+        self.host_server = os.getenv("HOST_SERVER")
+        if not self.api_key or not self.host_server:
+            raise ValueError("API credentials not found in .env file")
+
+        self.ws_manager = WebSocketManager(
+            api_key=self.api_key,
+            host=self.host_server,
+            ws_url=self._get_ws_url(),
+            on_tick_callback=self._on_tick,
+            logger=self.logger
+        )
+        self.ws_manager.start()
 
         self.live_prices = {}
         self._sym_rx = re.compile(r"^[A-Z]+(\d{2}[A-Z]{3}\d{2})(\d+)(CE|PE)$")
@@ -53,16 +68,6 @@ class StrangleStrategy:
             return f"ws://{host_url.replace('http://', '').split(':')[0]}:8765"
         return "ws://127.0.0.1:8765"
 
-    def _setup_api_client(self):
-        dotenv_path = os.path.join(os.path.dirname(__file__), '..', '..', '.env')
-        load_dotenv(dotenv_path=dotenv_path, override=True)
-        self.api_key = os.getenv("APP_KEY")
-        self.host_server = os.getenv("HOST_SERVER")
-        if not self.api_key or not self.host_server:
-            raise ValueError("API credentials not found in .env file")
-
-        self.client = api(api_key=self.api_key, host=self.host_server, ws_url=self._get_ws_url())
-
     def run(self):
         self.logger.info("Run - Checkpoint 1: Starting Strategy", extra={'event': 'DEBUG'})
         if not self.state.get('active_trade_id'):
@@ -77,7 +82,10 @@ class StrangleStrategy:
             # If there are active legs from a previous session, start monitoring them
             if self.state.get('active_legs'):
                 self.logger.info("Active legs found on startup. Resuming monitoring.")
-                self._start_monitoring()
+                symbols = [leg['symbol'] for leg in self.state['active_legs'].values()]
+                symbols.append(self.config['index'])
+                instrument_list = [{"exchange": "NSE_INDEX" if s == self.config['index'] else self.config['exchange'], "symbol": s} for s in symbols]
+                self.ws_manager.connect(instrument_list)
 
         self.logger.info(f"Run - Checkpoint 2: Initial state: {self.state}", extra={'event': 'DEBUG'})
 
@@ -104,7 +112,10 @@ class StrangleStrategy:
                 if not self.state.get('active_trade_id'):
                     self.execute_entry()
                     if self.state.get('active_legs'):
-                        self._start_monitoring()
+                        symbols = [leg['symbol'] for leg in self.state['active_legs'].values()]
+                        symbols.append(self.config['index'])
+                        instrument_list = [{"exchange": "NSE_INDEX" if s == self.config['index'] else self.config['exchange'], "symbol": s} for s in symbols]
+                        self.ws_manager.connect(instrument_list)
 
                 self.logger.info("Run - Checkpoint 9: Main thread sleeping", extra={'event': 'DEBUG'})
                 time.sleep(1)
@@ -115,49 +126,6 @@ class StrangleStrategy:
                 self.execute_exit()
                 break
 
-    def _start_monitoring(self):
-        self.logger.info("Attempting to start monitoring...", extra={'event': 'DEBUG'})
-        try:
-            self.client.connect()
-            self.logger.info("WebSocket connected successfully.", extra={'event': 'WEBSOCKET'})
-            self._manage_subscriptions()
-        except Exception as e:
-            self.logger.error(f"WebSocket connection failed: {e}. Switching to fallback.", extra={'event': 'ERROR'})
-            self._start_fallback_poll()
-
-    def _start_fallback_poll(self):
-        self.logger.warning("Starting REST API polling fallback.", extra={'event': 'WEBSOCKET'})
-        poll_thread = threading.Thread(target=self._fallback_poll_loop, daemon=True)
-        poll_thread.start()
-
-    def _fallback_poll_loop(self):
-        interval = self.config['websocket'].get('poll_interval_fallback', 1)
-        while True:
-            active_legs_copy = list(self.state.get('active_legs', {}).values())
-            for leg_info in active_legs_copy:
-                symbol = leg_info['symbol']
-                quote = self._make_api_request('POST', 'quotes', {"symbol": symbol, "exchange": self.config['exchange']})
-                if quote and quote.get('status') == 'success':
-                    self._on_tick({'symbol': symbol, 'ltp': quote['data']['ltp']})
-            time.sleep(interval)
-
-    def _manage_subscriptions(self, unsubscribe_list=None, subscribe_list=None):
-        self.logger.info(f"Managing subscriptions. Unsub: {unsubscribe_list}, Sub: {subscribe_list}", extra={'event': 'DEBUG'})
-        if unsubscribe_list:
-            self.client.unsubscribe_ltp(unsubscribe_list)
-            self.logger.info(f"Unsubscribed from: {unsubscribe_list}", extra={'event': 'WEBSOCKET'})
-
-        if subscribe_list:
-            self.logger.info(f"DIAGNOSTIC: Subscribing to {subscribe_list} with on_tick callback.", extra={'event': 'WEBSOCKET'})
-            self.client.subscribe_ltp(subscribe_list, on_data_received=self._on_tick)
-            self.logger.info(f"Subscribed to: {subscribe_list}", extra={'event': 'WEBSOCKET'})
-
-        if not unsubscribe_list and not subscribe_list:
-            symbols = [leg['symbol'] for leg in self.state['active_legs'].values()]
-            symbols.append(self.config['index'])
-            instrument_list = [{"exchange": "NSE_INDEX" if s == self.config['index'] else self.config['exchange'], "symbol": s} for s in symbols]
-            self.client.subscribe_ltp(instrument_list, on_data_received=self._on_tick)
-            self.logger.info(f"Initial subscription to: {instrument_list}", extra={'event': 'WEBSOCKET'})
 
     def execute_entry(self):
         self.logger.info("Attempting new trade entry.", extra={'event': 'ENTRY'})
@@ -287,13 +255,13 @@ class StrangleStrategy:
 
         self._place_leg_order(losing_leg_type, new_leg_info['symbol'], new_leg_info['strike'], "SELL", is_adjustment=True)
 
-        self.logger.info("DIAGNOSTIC: Adjustment complete. Initiating client reconnect to apply new subscriptions.", extra={'event': 'WEBSOCKET'})
+        self.logger.info("DIAGNOSTIC: Adjustment complete. Commanding WebSocketManager to reconnect.", extra={'event': 'WEBSOCKET'})
 
-        # Disconnect and reconnect the WebSocket client to subscribe to the new leg set
-        self.client.disconnect()
-        self._start_monitoring()
-
-        self.logger.info("DIAGNOSTIC: Client reconnect process completed.", extra={'event': 'WEBSOCKET'})
+        # Command the manager to reconnect with the new set of symbols
+        symbols = [leg['symbol'] for leg in self.state['active_legs'].values()]
+        symbols.append(self.config['index'])
+        instrument_list = [{"exchange": "NSE_INDEX" if s == self.config['index'] else self.config['exchange'], "symbol": s} for s in symbols]
+        self.ws_manager.reconnect(instrument_list)
 
         self.state['is_adjusting'] = False
         self.state_manager.save_state(self.strategy_name, self.mode, self.state)
@@ -354,39 +322,10 @@ class StrangleStrategy:
         self.state_manager.save_state(self.strategy_name, self.mode, self.state)
 
     def shutdown(self, reason="Manual shutdown"):
-        self.logger.info(f"DIAGNOSTIC: Shutdown initiated. Reason: {reason}", extra={'event': 'SHUTDOWN'})
-        try:
-            if self.client:
-                self.logger.info("DIAGNOSTIC: Client object found.", extra={'event': 'SHUTDOWN'})
-                unsubscribe_list = []
-                # Check for active legs in state and build the unsubscribe list
-                if self.state and self.state.get('active_legs'):
-                    self.logger.info(f"DIAGNOSTIC: Found active legs to unsubscribe: {self.state.get('active_legs')}", extra={'event': 'SHUTDOWN'})
-                    symbols = [leg['symbol'] for leg in self.state['active_legs'].values()]
-                    instrument_list = [{"exchange": self.config['exchange'], "symbol": s} for s in symbols]
-                    unsubscribe_list.extend(instrument_list)
-
-                # Also unsubscribe from the index if it was being monitored
-                if self.config.get('index'):
-                    self.logger.info(f"DIAGNOSTIC: Found index to unsubscribe: {self.config.get('index')}", extra={'event': 'SHUTDOWN'})
-                    unsubscribe_list.append({"exchange": "NSE_INDEX", "symbol": self.config['index']})
-
-                if unsubscribe_list:
-                    self.logger.info(f"DIAGNOSTIC: Calling _manage_subscriptions to unsubscribe from: {unsubscribe_list}", extra={'event': 'SHUTDOWN'})
-                    self._manage_subscriptions(unsubscribe_list=unsubscribe_list)
-                    self.logger.info("DIAGNOSTIC: Unsubscribe call completed. Waiting 1s.", extra={'event': 'SHUTDOWN'})
-                    time.sleep(1) # Give it a moment to process
-                else:
-                    self.logger.info("DIAGNOSTIC: No symbols to unsubscribe.", extra={'event': 'SHUTDOWN'})
-
-                self.logger.info("DIAGNOSTIC: Calling client.disconnect().", extra={'event': 'SHUTDOWN'})
-                self.client.disconnect()
-                self.logger.info("DIAGNOSTIC: client.disconnect() returned. Shutdown complete.", extra={'event': 'SHUTDOWN'})
-            else:
-                self.logger.warning("DIAGNOSTIC: Client object not found during shutdown.", extra={'event': 'SHUTDOWN'})
-
-        except Exception as e:
-            self.logger.error(f"DIAGNOSTIC: An error occurred during shutdown: {e}", exc_info=True, extra={'event': 'ERROR'})
+        self.logger.info(f"Shutdown initiated. Reason: {reason}", extra={'event': 'SHUTDOWN'})
+        if self.ws_manager:
+            self.ws_manager.stop()
+        self.logger.info("Strategy shutdown complete.", extra={'event': 'SHUTDOWN'})
 
     def _place_leg_order(self, leg_type: str, symbol: str, strike: int, action: str, is_adjustment: bool):
         mode = self.config['mode']
