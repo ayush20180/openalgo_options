@@ -3,6 +3,7 @@ import json
 import time
 import re
 import asyncio
+import threading
 from datetime import datetime, time as time_obj
 import pytz
 from dotenv import load_dotenv
@@ -104,7 +105,6 @@ class StrangleStrategy:
             self._start_fallback_poll()
 
     def _start_fallback_poll(self):
-        import threading
         self.logger.warning("Starting REST API polling fallback.", extra={'event': 'WEBSOCKET'})
         poll_thread = threading.Thread(target=self._fallback_poll_loop, daemon=True)
         poll_thread.start()
@@ -126,7 +126,6 @@ class StrangleStrategy:
             self.logger.info(f"Unsubscribed from: {unsubscribe_list}", extra={'event': 'WEBSOCKET'})
 
         if subscribe_list:
-            # Subsequent subscriptions should not include the callback again
             self.client.subscribe_ltp(subscribe_list)
             self.logger.info(f"Subscribed to: {subscribe_list}", extra={'event': 'WEBSOCKET'})
 
@@ -139,7 +138,6 @@ class StrangleStrategy:
                 exchange = "NSE_INDEX" if s == self.config['index'] else self.config['exchange']
                 instrument_list.append({"exchange": exchange, "symbol": s})
 
-            # The callback is only set once on the initial subscription
             self.client.subscribe_ltp(instrument_list, on_data_received=self._on_tick)
             self.logger.info(f"Initial subscription to: {instrument_list}", extra={'event': 'WEBSOCKET'})
 
@@ -180,7 +178,6 @@ class StrangleStrategy:
             ltp = data.get('data', {}).get('ltp')
             if symbol and ltp is not None:
                 self.live_prices[symbol] = ltp
-                # Check the lock before calling the adjustment logic
                 if not self.state.get('is_adjusting'):
                     self.monitor_and_adjust()
         except Exception as e:
@@ -213,18 +210,18 @@ class StrangleStrategy:
             max_adjustments = self.config['adjustment'].get('max_adjustments', 5)
             if self.state['adjustment_count'] < max_adjustments:
                 self.logger.info(f"Adjustment triggered for {smaller_leg} leg. Prices: {smaller_price:.2f} < {larger_price:.2f} * {threshold:.2f}", extra={'event': 'ADJUSTMENT'})
-                # Set the lock
                 self.state['is_adjusting'] = True
                 self.state['adjustment_count'] += 1
                 self.state_manager.save_state(self.strategy_name, self.mode, self.state)
-                self._perform_adjustment(smaller_leg, larger_price)
+                # Run the adjustment in a separate thread to avoid blocking the WebSocket
+                adj_thread = threading.Thread(target=self._perform_adjustment, args=(smaller_leg, larger_price), daemon=True)
+                adj_thread.start()
             else:
                 self.logger.warning(f"Max adjustments reached. Squaring off position.", extra={'event': 'EXIT'})
                 self.execute_exit("Max adjustments reached")
 
     def _perform_adjustment(self, losing_leg_type: str, target_premium: float):
         losing_leg_info = self.state['active_legs'][losing_leg_type]
-        # Use the robust dynamic subscription method
         self._manage_subscriptions(unsubscribe_list=[{"exchange": self.config['exchange'], "symbol": losing_leg_info['symbol']}])
         self._square_off_leg(losing_leg_type, losing_leg_info, is_adjustment=True)
 
@@ -234,6 +231,8 @@ class StrangleStrategy:
         new_leg_info = asyncio.run(self._find_new_leg(losing_leg_type, target_premium))
         if not new_leg_info:
             self.execute_exit("Failed to find adjustment leg")
+            self.state['is_adjusting'] = False
+            self.state_manager.save_state(self.strategy_name, self.mode, self.state)
             return
 
         new_strike = new_leg_info['strike']
@@ -245,7 +244,6 @@ class StrangleStrategy:
         self._place_leg_order(losing_leg_type, new_leg_info['symbol'], new_leg_info['strike'], "SELL", is_adjustment=True)
         self._manage_subscriptions(subscribe_list=[{"exchange": self.config['exchange'], "symbol": new_leg_info['symbol']}])
 
-        # Release the lock
         self.state['is_adjusting'] = False
         self.state_manager.save_state(self.strategy_name, self.mode, self.state)
 
