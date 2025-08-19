@@ -62,42 +62,32 @@ class StrangleStrategy:
         self.client = api(api_key=self.api_key, host=self.host_server, ws_url=self._get_ws_url())
 
     def run(self):
-        self.logger.info("Run - Checkpoint 1: Starting Strategy", extra={'event': 'DEBUG'})
+        self.logger.info("Starting Strategy", extra={'event': 'INFO'})
         if not self.state.get('active_trade_id'):
             self.state = {'active_trade_id': None, 'active_legs': {}, 'adjustment_count': 0, 'is_adjusting': False, 'mode': self.mode}
-        self.logger.info("Run - Checkpoint 2: State initialized", extra={'event': 'DEBUG'})
 
         start_time = time_obj.fromisoformat(self.config['start_time'])
-        self.logger.info("Run - Checkpoint 3: Parsed start_time", extra={'event': 'DEBUG'})
         end_time = time_obj.fromisoformat(self.config['end_time'])
-        self.logger.info("Run - Checkpoint 4: Parsed end_time", extra={'event': 'DEBUG'})
         ist = pytz.timezone("Asia/Kolkata")
-        self.logger.info("Run - Checkpoint 5: Timezone set", extra={'event': 'DEBUG'})
 
         while True:
-            self.logger.info("Run - Checkpoint 6: Top of main loop", extra={'event': 'DEBUG'})
             now_ist = datetime.now(ist).time()
-
             if now_ist < start_time:
-                self.logger.info(f"Waiting for trading window to start.", extra={'event': 'INFO'})
+                self.logger.info(f"Waiting for trading window to start at {start_time.strftime('%H:%M:%S')}.", extra={'event': 'INFO'})
                 wait_seconds = (datetime.combine(datetime.now(ist).date(), start_time) - datetime.now(ist)).total_seconds()
-                self.logger.info(f"Run - Checkpoint 7: Sleeping for {wait_seconds:.2f} seconds", extra={'event': 'DEBUG'})
                 time.sleep(max(1, wait_seconds))
                 continue
 
             if start_time <= now_ist < end_time:
-                self.logger.info("Run - Checkpoint 8: Inside trading window", extra={'event': 'DEBUG'})
                 if not self.state.get('active_trade_id'):
                     self.execute_entry()
                     if self.state.get('active_legs'):
                         self._start_monitoring()
-
-                self.logger.info("Run - Checkpoint 9: Main thread sleeping", extra={'event': 'DEBUG'})
                 time.sleep(60)
                 continue
 
             if now_ist >= end_time:
-                self.logger.info("Run - Checkpoint 10: After trading window", extra={'event': 'DEBUG'})
+                self.logger.info("Trading window has ended.", extra={'event': 'INFO'})
                 if self.state.get('active_trade_id'):
                     self.execute_exit()
                 else:
@@ -130,26 +120,17 @@ class StrangleStrategy:
                     self._on_tick({'symbol': symbol, 'ltp': quote['data']['ltp']})
             time.sleep(interval)
 
-    def _manage_subscriptions(self, unsubscribe_list=None, subscribe_list=None):
-        if unsubscribe_list:
-            self.client.unsubscribe_ltp(unsubscribe_list)
-            self.logger.info(f"Unsubscribed from: {unsubscribe_list}", extra={'event': 'WEBSOCKET'})
+    def _manage_subscriptions(self):
+        symbols = [leg['symbol'] for leg in self.state['active_legs'].values()]
+        symbols.append(self.config['index'])
 
-        if subscribe_list:
-            self.client.subscribe_ltp(subscribe_list, on_data_received=self._on_tick)
-            self.logger.info(f"Subscribed to: {subscribe_list}", extra={'event': 'WEBSOCKET'})
+        instrument_list = []
+        for s in symbols:
+            exchange = "NSE_INDEX" if s == self.config['index'] else self.config['exchange']
+            instrument_list.append({"exchange": exchange, "symbol": s})
 
-        if not unsubscribe_list and not subscribe_list:
-            symbols = [leg['symbol'] for leg in self.state['active_legs'].values()]
-            symbols.append(self.config['index'])
-
-            instrument_list = []
-            for s in symbols:
-                exchange = "NSE_INDEX" if s == self.config['index'] else self.config['exchange']
-                instrument_list.append({"exchange": exchange, "symbol": s})
-
-            self.client.subscribe_ltp(instrument_list, on_data_received=self._on_tick)
-            self.logger.info(f"Initial subscription to: {instrument_list}", extra={'event': 'WEBSOCKET'})
+        self.client.subscribe_ltp(instrument_list, on_data_received=self._on_tick)
+        self.logger.info(f"Initial subscription to: {instrument_list}", extra={'event': 'WEBSOCKET'})
 
     def execute_entry(self):
         self.logger.info("Attempting new trade entry.", extra={'event': 'ENTRY'})
@@ -183,7 +164,6 @@ class StrangleStrategy:
             self.logger.error(f"Error during entry: {e}", extra={'event': 'ERROR'}, exc_info=True)
 
     def _on_tick(self, data):
-        self.logger.info(f"Tick received: {data}", extra={'event': 'DEBUG'})
         try:
             symbol = data.get('symbol')
             ltp = data.get('data', {}).get('ltp')
@@ -194,38 +174,34 @@ class StrangleStrategy:
             self.logger.error(f"Error processing tick: {data} | Error: {e}", extra={'event': 'ERROR'})
 
     def monitor_and_adjust(self):
-        self.logger.info(f"Entering monitor_and_adjust. State: {self.state}, Live Prices: {self.live_prices}", extra={'event': 'DEBUG'})
+        now_ist = datetime.now(pytz.timezone("Asia/Kolkata")).time()
+        start_time = time_obj.fromisoformat(self.config['start_time'])
+        end_time = time_obj.fromisoformat(self.config['end_time'])
+        if not (start_time <= now_ist < end_time): return
 
-        if self.state.get('is_adjusting'):
-            self.logger.info("Guard fail: Already adjusting.", extra={'event': 'DEBUG'})
-            return
+        if self.state.get('is_adjusting'): return
 
         if not self.state.get('active_trade_id') or not self.config['adjustment']['enabled'] or len(self.state['active_legs']) != 2:
-            self.logger.info(f"Guard fail: Trade active? {bool(self.state.get('active_trade_id'))}, Adjust enabled? {self.config['adjustment']['enabled']}, Leg count: {len(self.state['active_legs'])}", extra={'event': 'DEBUG'})
             return
 
         ce_leg = self.state['active_legs'].get('CALL_SHORT')
         pe_leg = self.state['active_legs'].get('PUT_SHORT')
-        if not ce_leg or not pe_leg:
-            self.logger.info(f"Guard fail: CE leg exists? {bool(ce_leg)}, PE leg exists? {bool(pe_leg)}", extra={'event': 'DEBUG'})
-            return
+        if not ce_leg or not pe_leg: return
 
         ce_price = self.live_prices.get(ce_leg['symbol'])
         pe_price = self.live_prices.get(pe_leg['symbol'])
-        if ce_price is None or pe_price is None:
-            self.logger.info(f"Guard fail: CE price? {ce_price}, PE price? {pe_price}", extra={'event': 'DEBUG'})
-            return
+        if ce_price is None or pe_price is None: return
 
-        threshold = self.config['adjustment']['threshold_ratio']
         if ce_price < pe_price:
             smaller_price, larger_price, smaller_leg = ce_price, pe_price, 'CALL_SHORT'
         else:
             smaller_price, larger_price, smaller_leg = pe_price, ce_price, 'PUT_SHORT'
 
+        threshold = self.config['adjustment']['threshold_ratio']
         if smaller_price < larger_price * threshold:
             max_adjustments = self.config['adjustment'].get('max_adjustments', 5)
             if self.state['adjustment_count'] < max_adjustments:
-                self.logger.info(f"Adjustment triggered for {smaller_leg} leg.", extra={'event': 'ADJUSTMENT'})
+                self.logger.info(f"Adjustment triggered for {smaller_leg} leg. Prices: {smaller_price:.2f} < {larger_price:.2f} * {threshold:.2f}", extra={'event': 'ADJUSTMENT'})
                 self.state['is_adjusting'] = True
                 self.state['adjustment_count'] += 1
                 self.state_manager.save_state(self.strategy_name, self.mode, self.state)
@@ -235,37 +211,38 @@ class StrangleStrategy:
                 self.execute_exit("Max adjustments reached")
 
     def _perform_adjustment(self, losing_leg_type: str, target_premium: float):
-        self.logger.info(f"Performing adjustment for {losing_leg_type}", extra={'event': 'DEBUG'})
-        losing_leg_info = self.state['active_legs'][losing_leg_type]
-        self._manage_subscriptions(unsubscribe_list=[{"exchange": self.config['exchange'], "symbol": losing_leg_info['symbol']}])
-        self._square_off_leg(losing_leg_type, losing_leg_info, is_adjustment=True)
+        # Disconnect, adjust, and reconnect for safety
+        self.logger.info("Disconnecting WebSocket for safe adjustment.", extra={'event': 'WEBSOCKET'})
+        try:
+            self.client.disconnect()
+        except Exception: pass
 
-        remaining_leg_type = 'PUT_SHORT' if losing_leg_type == 'CALL_SHORT' else 'CALL_SHORT'
-        remaining_leg_strike = self.state['active_legs'][remaining_leg_type]['strike']
+        losing_leg_info = self.state['active_legs'][losing_leg_type]
+        self._square_off_leg(losing_leg_type, losing_leg_info, is_adjustment=True)
 
         new_leg_info = asyncio.run(self._find_new_leg(losing_leg_type, target_premium))
         if not new_leg_info:
             self.execute_exit("Failed to find adjustment leg")
-            self.state['is_adjusting'] = False
-            self.state_manager.save_state(self.strategy_name, self.mode, self.state)
             return
 
+        remaining_leg_type = 'PUT_SHORT' if losing_leg_type == 'CALL_SHORT' else 'CALL_SHORT'
+        remaining_leg_strike = self.state['active_legs'][remaining_leg_type]['strike']
         new_strike = new_leg_info['strike']
         if (losing_leg_type == 'PUT_SHORT' and remaining_leg_strike < new_strike) or \
            (losing_leg_type == 'CALL_SHORT' and new_strike < remaining_leg_strike):
             self.execute_exit("Inverted strangle condition")
-            # No need to reset is_adjusting flag here, as execute_exit will terminate.
             return
 
         self._place_leg_order(losing_leg_type, new_leg_info['symbol'], new_leg_info['strike'], "SELL", is_adjustment=True)
-        self._manage_subscriptions(subscribe_list=[{"exchange": self.config['exchange'], "symbol": new_leg_info['symbol']}])
 
         self.state['is_adjusting'] = False
         self.state_manager.save_state(self.strategy_name, self.mode, self.state)
 
+        self.logger.info("Adjustment complete. Reconnecting WebSocket.", extra={'event': 'WEBSOCKET'})
+        self._start_monitoring() # Reconnect and resubscribe
+
     async def _find_new_leg(self, option_type: str, target_premium: float):
         ot = "CE" if "CALL" in option_type else "PE"
-        self.logger.info(f"Finding new {ot} leg near premium {target_premium}", extra={'event': 'DEBUG'})
         index_symbol = self.config['index']
         quote_res = self._make_api_request('POST', 'quotes', {"symbol": index_symbol, "exchange": "NSE_INDEX"})
         spot_price = quote_res['data']['ltp']
@@ -280,7 +257,6 @@ class StrangleStrategy:
         expiry_str = m.group(1)
 
         symbols_to_check = [f"{index_symbol}{expiry_str}{k}{ot}" for k in strikes_to_check]
-        self.logger.info(f"Checking {len(symbols_to_check)} strikes for new leg.", extra={'event': 'DEBUG'})
 
         tasks = [asyncio.to_thread(self._make_api_request, 'POST', 'quotes', {"symbol": s, "exchange": self.config['exchange']}) for s in symbols_to_check]
         results = await asyncio.gather(*tasks)
