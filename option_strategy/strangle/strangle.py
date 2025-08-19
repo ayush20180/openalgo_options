@@ -64,46 +64,35 @@ class StrangleStrategy:
     def run(self):
         self.logger.info("Starting Strategy", extra={'event': 'INFO'})
         if not self.state.get('active_trade_id'):
-            self.state = {'active_trade_id': None, 'active_legs': {}, 'adjustment_count': 0, 'mode': self.mode}
+            self.state = {'active_trade_id': None, 'active_legs': {}, 'adjustment_count': 0, 'is_adjusting': False, 'mode': self.mode}
 
         start_time = time_obj.fromisoformat(self.config['start_time'])
         end_time = time_obj.fromisoformat(self.config['end_time'])
         ist = pytz.timezone("Asia/Kolkata")
 
-        # This is the main lifecycle loop for the strategy script
         while True:
             now_ist = datetime.now(ist).time()
-
-            # --- Before Trading Window ---
             if now_ist < start_time:
                 self.logger.info(f"Waiting for trading window to start at {start_time.strftime('%H:%M:%S')}.", extra={'event': 'INFO'})
-                # Sleep until the window starts, with a small buffer
                 wait_seconds = (datetime.combine(datetime.now(ist).date(), start_time) - datetime.now(ist)).total_seconds()
                 time.sleep(max(1, wait_seconds))
                 continue
 
-            # --- During Trading Window ---
             if start_time <= now_ist < end_time:
-                # Place entry trade if there isn't one
                 if not self.state.get('active_trade_id'):
                     self.execute_entry()
-                    # After entry, start monitoring
                     if self.state.get('active_legs'):
                         self._start_monitoring()
-
-                # Main thread will now just wait while the WebSocket thread handles monitoring.
-                # We can add a health check here later if needed.
                 time.sleep(60)
                 continue
 
-            # --- After Trading Window ---
             if now_ist >= end_time:
                 self.logger.info("Trading window has ended.", extra={'event': 'INFO'})
                 if self.state.get('active_trade_id'):
                     self.execute_exit()
                 else:
                     self.logger.info("No active trade to exit. Shutting down.", extra={'event': 'INFO'})
-                break # Exit the main while loop and terminate the script
+                break
 
     def _start_monitoring(self):
         try:
@@ -194,14 +183,12 @@ class StrangleStrategy:
             self.logger.error(f"Error processing tick: {data} | Error: {e}", extra={'event': 'ERROR'})
 
     def monitor_and_adjust(self):
-        # Time check guard clause
         now_ist = datetime.now(pytz.timezone("Asia/Kolkata")).time()
         start_time = time_obj.fromisoformat(self.config['start_time'])
         end_time = time_obj.fromisoformat(self.config['end_time'])
-        if not (start_time <= now_ist < end_time):
-            return
+        if not (start_time <= now_ist < end_time): return
 
-        if not self.state.get('active_trade_id') or not self.config['adjustment']['enabled'] or len(self.state['active_legs']) != 2:
+        if not self.state.get('active_trade_id') or not self.config['adjustment']['enabled'] or len(self.state['active_legs']) != 2 or self.state.get('is_adjusting'):
             return
 
         ce_leg = self.state['active_legs'].get('CALL_SHORT')
@@ -212,21 +199,23 @@ class StrangleStrategy:
         pe_price = self.live_prices.get(pe_leg['symbol'])
         if ce_price is None or pe_price is None: return
 
-        max_adjustments = self.config['adjustment'].get('max_adjustments', 5)
-        if self.state['adjustment_count'] >= max_adjustments: return
-
         threshold = self.config['adjustment']['threshold_ratio']
-
         if ce_price < pe_price:
             smaller_price, larger_price, smaller_leg = ce_price, pe_price, 'CALL_SHORT'
         else:
             smaller_price, larger_price, smaller_leg = pe_price, ce_price, 'PUT_SHORT'
 
         if smaller_price < larger_price * threshold:
-            self.logger.info(f"Adjustment triggered for {smaller_leg} leg. Prices: {smaller_price} < {larger_price} * {threshold}", extra={'event': 'ADJUSTMENT'})
-            self.state['adjustment_count'] += 1
-            self._perform_adjustment(smaller_leg, larger_price)
-            self.state_manager.save_state(self.strategy_name, self.mode, self.state)
+            max_adjustments = self.config['adjustment'].get('max_adjustments', 5)
+            if self.state['adjustment_count'] < max_adjustments:
+                self.logger.info(f"Adjustment triggered for {smaller_leg} leg. Prices: {smaller_price} < {larger_price} * {threshold}", extra={'event': 'ADJUSTMENT'})
+                self.state['is_adjusting'] = True
+                self.state['adjustment_count'] += 1
+                self.state_manager.save_state(self.strategy_name, self.mode, self.state)
+                self._perform_adjustment(smaller_leg, larger_price)
+            else:
+                self.logger.warning(f"Max adjustments reached. Squaring off position.", extra={'event': 'EXIT'})
+                self.execute_exit("Max adjustments reached")
 
     def _perform_adjustment(self, losing_leg_type: str, target_premium: float):
         losing_leg_info = self.state['active_legs'][losing_leg_type]
@@ -250,6 +239,9 @@ class StrangleStrategy:
         self._place_leg_order(losing_leg_type, new_leg_info['symbol'], new_leg_info['strike'], "SELL", is_adjustment=True)
         self._manage_subscriptions(subscribe_list=[{"exchange": self.config['exchange'], "symbol": new_leg_info['symbol']}])
 
+        self.state['is_adjusting'] = False
+        self.state_manager.save_state(self.strategy_name, self.mode, self.state)
+
     async def _find_new_leg(self, option_type: str, target_premium: float):
         ot = "CE" if "CALL" in option_type else "PE"
         index_symbol = self.config['index']
@@ -270,22 +262,6 @@ class StrangleStrategy:
         tasks = [asyncio.to_thread(self._make_api_request, 'POST', 'quotes', {"symbol": s, "exchange": self.config['exchange']}) for s in symbols_to_check]
         results = await asyncio.gather(*tasks)
 
-        successful_quotes = []
-        for res in results:
-            if res and res.get('status') == 'success':
-                # The quote response doesn't contain the symbol, so we can't easily re-associate it here.
-                # A more robust solution would be to wrap the API call to return the symbol.
-                # For now, we assume the order is preserved, but this is fragile.
-                # Let's find a way to add the symbol back.
-                # This part of the logic is complex and needs a better solution.
-                # For now, we will assume the REST call returns the symbol, or we find another way.
-                # The bug is likely here.
-                pass # This logic needs to be re-thought.
-
-        # The logic to find the best leg is flawed because successful_quotes is empty.
-        # I will re-implement this part.
-
-        # Re-implementation
         successful_quotes = []
         for i, res in enumerate(results):
              if res and res.get('status') == 'success':
@@ -308,9 +284,7 @@ class StrangleStrategy:
         try:
             if self.client:
                 self.client.disconnect()
-        except Exception as e:
-            self.logger.warning(f"Error during WebSocket disconnect (may be already closed): {e}", extra={'event': 'WEBSOCKET'})
-
+        except Exception: pass
         self.logger.info(f"Closing trade {self.state.get('active_trade_id')} due to: {reason}", extra={'event': 'EXIT'})
         for leg_type, leg_info in list(self.state['active_legs'].items()):
             self._square_off_leg(leg_type, leg_info, is_adjustment=False)
