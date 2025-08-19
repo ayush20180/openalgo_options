@@ -120,17 +120,28 @@ class StrangleStrategy:
                     self._on_tick({'symbol': symbol, 'ltp': quote['data']['ltp']})
             time.sleep(interval)
 
-    def _manage_subscriptions(self):
-        symbols = [leg['symbol'] for leg in self.state['active_legs'].values()]
-        symbols.append(self.config['index'])
+    def _manage_subscriptions(self, unsubscribe_list=None, subscribe_list=None):
+        if unsubscribe_list:
+            self.client.unsubscribe_ltp(unsubscribe_list)
+            self.logger.info(f"Unsubscribed from: {unsubscribe_list}", extra={'event': 'WEBSOCKET'})
 
-        instrument_list = []
-        for s in symbols:
-            exchange = "NSE_INDEX" if s == self.config['index'] else self.config['exchange']
-            instrument_list.append({"exchange": exchange, "symbol": s})
+        if subscribe_list:
+            # Subsequent subscriptions should not include the callback again
+            self.client.subscribe_ltp(subscribe_list)
+            self.logger.info(f"Subscribed to: {subscribe_list}", extra={'event': 'WEBSOCKET'})
 
-        self.client.subscribe_ltp(instrument_list, on_data_received=self._on_tick)
-        self.logger.info(f"Initial subscription to: {instrument_list}", extra={'event': 'WEBSOCKET'})
+        if not unsubscribe_list and not subscribe_list:
+            symbols = [leg['symbol'] for leg in self.state['active_legs'].values()]
+            symbols.append(self.config['index'])
+
+            instrument_list = []
+            for s in symbols:
+                exchange = "NSE_INDEX" if s == self.config['index'] else self.config['exchange']
+                instrument_list.append({"exchange": exchange, "symbol": s})
+
+            # The callback is only set once on the initial subscription
+            self.client.subscribe_ltp(instrument_list, on_data_received=self._on_tick)
+            self.logger.info(f"Initial subscription to: {instrument_list}", extra={'event': 'WEBSOCKET'})
 
     def execute_entry(self):
         self.logger.info("Attempting new trade entry.", extra={'event': 'ENTRY'})
@@ -169,7 +180,9 @@ class StrangleStrategy:
             ltp = data.get('data', {}).get('ltp')
             if symbol and ltp is not None:
                 self.live_prices[symbol] = ltp
-                self.monitor_and_adjust()
+                # Check the lock before calling the adjustment logic
+                if not self.state.get('is_adjusting'):
+                    self.monitor_and_adjust()
         except Exception as e:
             self.logger.error(f"Error processing tick: {data} | Error: {e}", extra={'event': 'ERROR'})
 
@@ -178,8 +191,6 @@ class StrangleStrategy:
         start_time = time_obj.fromisoformat(self.config['start_time'])
         end_time = time_obj.fromisoformat(self.config['end_time'])
         if not (start_time <= now_ist < end_time): return
-
-        if self.state.get('is_adjusting'): return
 
         if not self.state.get('active_trade_id') or not self.config['adjustment']['enabled'] or len(self.state['active_legs']) != 2:
             return
@@ -202,6 +213,7 @@ class StrangleStrategy:
             max_adjustments = self.config['adjustment'].get('max_adjustments', 5)
             if self.state['adjustment_count'] < max_adjustments:
                 self.logger.info(f"Adjustment triggered for {smaller_leg} leg. Prices: {smaller_price:.2f} < {larger_price:.2f} * {threshold:.2f}", extra={'event': 'ADJUSTMENT'})
+                # Set the lock
                 self.state['is_adjusting'] = True
                 self.state['adjustment_count'] += 1
                 self.state_manager.save_state(self.strategy_name, self.mode, self.state)
@@ -211,22 +223,19 @@ class StrangleStrategy:
                 self.execute_exit("Max adjustments reached")
 
     def _perform_adjustment(self, losing_leg_type: str, target_premium: float):
-        # Disconnect, adjust, and reconnect for safety
-        self.logger.info("Disconnecting WebSocket for safe adjustment.", extra={'event': 'WEBSOCKET'})
-        try:
-            self.client.disconnect()
-        except Exception: pass
-
         losing_leg_info = self.state['active_legs'][losing_leg_type]
+        # Use the robust dynamic subscription method
+        self._manage_subscriptions(unsubscribe_list=[{"exchange": self.config['exchange'], "symbol": losing_leg_info['symbol']}])
         self._square_off_leg(losing_leg_type, losing_leg_info, is_adjustment=True)
+
+        remaining_leg_type = 'PUT_SHORT' if losing_leg_type == 'CALL_SHORT' else 'CALL_SHORT'
+        remaining_leg_strike = self.state['active_legs'][remaining_leg_type]['strike']
 
         new_leg_info = asyncio.run(self._find_new_leg(losing_leg_type, target_premium))
         if not new_leg_info:
             self.execute_exit("Failed to find adjustment leg")
             return
 
-        remaining_leg_type = 'PUT_SHORT' if losing_leg_type == 'CALL_SHORT' else 'CALL_SHORT'
-        remaining_leg_strike = self.state['active_legs'][remaining_leg_type]['strike']
         new_strike = new_leg_info['strike']
         if (losing_leg_type == 'PUT_SHORT' and remaining_leg_strike < new_strike) or \
            (losing_leg_type == 'CALL_SHORT' and new_strike < remaining_leg_strike):
@@ -234,12 +243,11 @@ class StrangleStrategy:
             return
 
         self._place_leg_order(losing_leg_type, new_leg_info['symbol'], new_leg_info['strike'], "SELL", is_adjustment=True)
+        self._manage_subscriptions(subscribe_list=[{"exchange": self.config['exchange'], "symbol": new_leg_info['symbol']}])
 
+        # Release the lock
         self.state['is_adjusting'] = False
         self.state_manager.save_state(self.strategy_name, self.mode, self.state)
-
-        self.logger.info("Adjustment complete. Reconnecting WebSocket.", extra={'event': 'WEBSOCKET'})
-        self._start_monitoring() # Reconnect and resubscribe
 
     async def _find_new_leg(self, option_type: str, target_premium: float):
         ot = "CE" if "CALL" in option_type else "PE"
@@ -272,11 +280,9 @@ class StrangleStrategy:
                 successful_quotes.append(data)
 
         if not successful_quotes:
-            self.logger.warning("Could not fetch any quotes for new leg.", extra={'event': 'DEBUG'})
             return None
 
         best_leg = min(successful_quotes, key=lambda q: abs(q['ltp'] - target_premium))
-        self.logger.info(f"Found best new leg: {best_leg['symbol']} with price {best_leg['ltp']}", extra={'event': 'ADJUSTMENT'})
         return best_leg
 
     def execute_exit(self, reason="Scheduled Exit"):
