@@ -97,7 +97,6 @@ class StrangleStrategy:
         self.logger.info("Run - Checkpoint 5: Timezone set", extra={'event': 'DEBUG'})
 
         while True:
-            self.logger.info("Run - Checkpoint 6: Top of main loop", extra={'event': 'DEBUG'})
             now_ist = datetime.now(ist).time()
 
             if now_ist < start_time:
@@ -108,7 +107,6 @@ class StrangleStrategy:
                 continue
 
             if start_time <= now_ist < end_time:
-                self.logger.info("Run - Checkpoint 8: Inside trading window", extra={'event': 'DEBUG'})
                 if not self.state.get('active_trade_id'):
                     self.execute_entry()
                     if self.state.get('active_legs'):
@@ -117,7 +115,6 @@ class StrangleStrategy:
                         instrument_list = [{"exchange": "NSE_INDEX" if s == self.config['index'] else self.config['exchange'], "symbol": s} for s in symbols]
                         self.ws_manager.connect(instrument_list)
 
-                self.logger.info("Run - Checkpoint 9: Main thread sleeping", extra={'event': 'DEBUG'})
                 time.sleep(1)
                 continue
 
