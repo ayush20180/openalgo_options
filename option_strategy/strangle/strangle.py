@@ -38,6 +38,7 @@ class StrangleStrategy:
         self._setup_api_client()
 
         self.live_prices = {}
+        self.adjustment_completion_queue = queue.Queue()
         self._sym_rx = re.compile(r"^[A-Z]+(\d{2}[A-Z]{3}\d{2})(\d+)(CE|PE)$")
         self.logger.info("Strategy initialized", extra={'event': 'INFO'})
 
@@ -89,6 +90,16 @@ class StrangleStrategy:
         self.logger.info("Run - Checkpoint 5: Timezone set", extra={'event': 'DEBUG'})
 
         while True:
+            try:
+                # Check for completed adjustments that need subscription changes
+                adj_info = self.adjustment_completion_queue.get_nowait()
+                self.logger.info(f"DIAGNOSTIC: Dequeued adjustment info: {adj_info}. Processing subscription change.", extra={'event': 'QUEUE'})
+                unsubscribe_list = [{"exchange": self.config['exchange'], "symbol": adj_info['old_symbol']}]
+                subscribe_list = [{"exchange": self.config['exchange'], "symbol": adj_info['new_symbol']}]
+                self._manage_subscriptions(unsubscribe_list=unsubscribe_list, subscribe_list=subscribe_list)
+            except queue.Empty:
+                pass # No adjustments to process
+
             self.logger.info("Run - Checkpoint 6: Top of main loop", extra={'event': 'DEBUG'})
             now_ist = datetime.now(ist).time()
 
@@ -107,7 +118,7 @@ class StrangleStrategy:
                         self._start_monitoring()
 
                 self.logger.info("Run - Checkpoint 9: Main thread sleeping", extra={'event': 'DEBUG'})
-                time.sleep(60)
+                time.sleep(1)
                 continue
 
             if now_ist >= end_time:
@@ -289,11 +300,13 @@ class StrangleStrategy:
 
         self._place_leg_order(losing_leg_type, new_leg_info['symbol'], new_leg_info['strike'], "SELL", is_adjustment=True)
 
-        # Directly manage subscriptions instead of using the queue
-        self.logger.info("Directly updating subscriptions post-adjustment.", extra={'event': 'DEBUG'})
-        unsubscribe_list = [{"exchange": self.config['exchange'], "symbol": losing_leg_info['symbol']}]
-        subscribe_list = [{"exchange": self.config['exchange'], "symbol": new_leg_info['symbol']}]
-        self._manage_subscriptions(unsubscribe_list=unsubscribe_list, subscribe_list=subscribe_list)
+        # Put a message on the queue for the main thread to process subscription changes
+        adjustment_details = {
+            'old_symbol': losing_leg_info['symbol'],
+            'new_symbol': new_leg_info['symbol']
+        }
+        self.adjustment_completion_queue.put(adjustment_details)
+        self.logger.info(f"DIAGNOSTIC: Added adjustment details to queue for main thread processing: {adjustment_details}", extra={'event': 'QUEUE'})
 
         self.state['is_adjusting'] = False
         self.state_manager.save_state(self.strategy_name, self.mode, self.state)
