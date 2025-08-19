@@ -83,8 +83,9 @@ class StrangleStrategy:
 
             if now_ist < start_time:
                 wait_seconds = (datetime.combine(datetime.now(ist).date(), start_time) - datetime.now(ist)).total_seconds()
-                self.logger.info(f"Waiting for trading window. Sleeping for {wait_seconds:.2f} seconds.", extra={'event': 'INFO'})
-                if wait_seconds > 0: time.sleep(wait_seconds)
+                self.logger.info(f"Waiting for trading window to start at {start_time.strftime('%H:%M:%S')}. Sleeping for {wait_seconds:.2f} seconds.", extra={'event': 'INFO'})
+                if wait_seconds > 0:
+                    time.sleep(wait_seconds)
                 continue
 
             if start_time <= now_ist < end_time:
@@ -284,8 +285,44 @@ class StrangleStrategy:
         self.state_manager.save_state(self.strategy_name, self.mode, self.state)
 
     async def _find_new_leg(self, option_type: str, target_premium: float):
-        # ... (Same as before) ...
-        pass
+        ot = "CE" if "CALL" in option_type else "PE"
+        self.logger.info(f"Finding new {ot} leg near premium {target_premium}", extra={'event': 'DEBUG'})
+        index_symbol = self.config['index']
+        quote_res = self._make_api_request('POST', 'quotes', {"symbol": index_symbol, "exchange": "NSE_INDEX"})
+        spot_price = quote_res['data']['ltp']
+        strike_interval = self.config['strike_interval'][index_symbol]
+        atm_strike = int(round(spot_price / strike_interval) * strike_interval)
+
+        radius = self.config['adjustment']['strike_search_radius']
+        strikes_to_check = [atm_strike + i * strike_interval for i in range(-radius, radius + 1)]
+
+        active_leg = next(iter(self.state['active_legs'].values()))
+        m = self._sym_rx.match(active_leg['symbol'])
+        expiry_str = m.group(1)
+
+        symbols_to_check = [f"{index_symbol}{expiry_str}{k}{ot}" for k in strikes_to_check]
+        self.logger.info(f"Checking {len(symbols_to_check)} strikes for new leg.", extra={'event': 'DEBUG'})
+
+        tasks = [asyncio.to_thread(self._make_api_request, 'POST', 'quotes', {"symbol": s, "exchange": self.config['exchange']}) for s in symbols_to_check]
+        results = await asyncio.gather(*tasks)
+
+        successful_quotes = []
+        for i, res in enumerate(results):
+             if res and res.get('status') == 'success':
+                symbol = symbols_to_check[i]
+                data = res['data']
+                data['symbol'] = symbol
+                m = self._sym_rx.match(symbol)
+                if m: data['strike'] = int(m.group(2))
+                successful_quotes.append(data)
+
+        if not successful_quotes:
+            self.logger.warning("Could not fetch any quotes for new leg.", extra={'event': 'DEBUG'})
+            return None
+
+        best_leg = min(successful_quotes, key=lambda q: abs(q['ltp'] - target_premium))
+        self.logger.info(f"Found best new leg: {best_leg['symbol']} with price {best_leg['ltp']}", extra={'event': 'ADJUSTMENT'})
+        return best_leg
 
     def execute_exit(self, reason="Scheduled Exit"):
         self.shutdown(reason=f"Exiting Trade: {reason}")
@@ -302,13 +339,48 @@ class StrangleStrategy:
         except Exception: pass
 
     def _place_leg_order(self, leg_type: str, symbol: str, strike: int, action: str, is_adjustment: bool):
-        # ... (Same as before) ...
-        pass
+        mode = self.config['mode']
+        lots = self.config['quantity_in_lots']
+        lot_size = self.config['lot_size'][self.config['index']]
+        total_quantity = lots * lot_size
+
+        self.logger.info(f"Placing {action} {leg_type} order for {symbol}", extra={'event': 'ORDER'})
+
+        if mode == 'LIVE':
+            payload = {"symbol": symbol, "action": action, "quantity": str(total_quantity), "product": self.config['product_type'], "exchange": self.config['exchange'], "pricetype": "MARKET", "strategy": self.strategy_name}
+            order_res = self._make_api_request('POST', 'placeorder', payload)
+            if order_res.get('status') == 'success':
+                order_id = order_res.get('orderid')
+                self.journal.record_trade(self.state['active_trade_id'], order_id, action, symbol, total_quantity, 0, leg_type, is_adjustment, mode)
+                if action == "SELL": self.state['active_legs'][leg_type] = {'symbol': symbol, 'strike': strike}
+            else:
+                self.logger.error(f"Failed to place LIVE order for {symbol}", extra={'event': 'ERROR'})
+        elif mode == 'PAPER':
+            quote_res = self._make_api_request('POST', 'quotes', {"symbol": symbol, "exchange": self.config['exchange']})
+            if quote_res.get('status') == 'success':
+                price = quote_res['data']['ltp']
+                order_id = f'paper_{int(time.time())}'
+                self.journal.record_trade(self.state['active_trade_id'], order_id, action, symbol, total_quantity, price, leg_type, is_adjustment, mode)
+                if action == "SELL": self.state['active_legs'][leg_type] = {'symbol': symbol, 'strike': strike}
+            else:
+                self.logger.error(f"Could not fetch quote for {symbol} for paper trade.", extra={'event': 'ERROR'})
 
     def _square_off_leg(self, leg_type: str, leg_info: dict, is_adjustment: bool):
-        # ... (Same as before) ...
-        pass
+        self.logger.info(f"Squaring off {leg_type} leg: {leg_info['symbol']}", extra={'event': 'ADJUSTMENT' if is_adjustment else 'EXIT'})
+        self._place_leg_order(leg_type, leg_info['symbol'], leg_info['strike'], "BUY", is_adjustment=is_adjustment)
+        self.state['active_legs'].pop(leg_type, None)
 
     def _make_api_request(self, method: str, endpoint: str, payload: dict = None):
-        # ... (Same as before) ...
-        pass
+        url = f"{self.host_server}/api/v1/{endpoint}"
+        req_payload = payload or {}
+        req_payload['apikey'] = self.api_key
+        try:
+            if method.upper() == 'POST':
+                response = requests.post(url, json=req_payload, timeout=10)
+            else:
+                response = requests.get(url, params=req_payload, timeout=10)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            self.logger.error(f"API request to {endpoint} failed: {e}", extra={'event': 'ERROR'})
+            return {"status": "error", "message": str(e)}
