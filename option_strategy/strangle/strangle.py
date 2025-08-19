@@ -4,6 +4,7 @@ import time
 import re
 import asyncio
 import threading
+import queue
 from datetime import datetime, time as time_obj
 import pytz
 from dotenv import load_dotenv
@@ -37,6 +38,7 @@ class StrangleStrategy:
         self._setup_api_client()
 
         self.live_prices = {}
+        self.subscription_queue = queue.Queue()
         self._sym_rx = re.compile(r"^[A-Z]+(\d{2}[A-Z]{3}\d{2})(\d+)(CE|PE)$")
         self.logger.info("Strategy initialized", extra={'event': 'INFO'})
 
@@ -172,8 +174,26 @@ class StrangleStrategy:
         except Exception as e:
             self.logger.error(f"Error during entry: {e}", extra={'event': 'ERROR'}, exc_info=True)
 
+    def _process_subscription_queue(self):
+        """Processes any pending subscription changes from the queue."""
+        while not self.subscription_queue.empty():
+            try:
+                message = self.subscription_queue.get_nowait()
+                self.logger.info(f"Processing subscription message from queue: {message}", extra={'event': 'WEBSOCKET'})
+                self._manage_subscriptions(
+                    unsubscribe_list=message.get('unsubscribe'),
+                    subscribe_list=message.get('subscribe')
+                )
+            except queue.Empty:
+                break # Queue is empty, nothing more to do
+            except Exception as e:
+                self.logger.error(f"Error processing subscription queue: {e}", extra={'event': 'ERROR'})
+
     def _on_tick(self, data):
         try:
+            # Process any pending subscription changes first
+            self._process_subscription_queue()
+
             symbol = data.get('symbol')
             ltp = data.get('data', {}).get('ltp')
             if symbol and ltp is not None:
@@ -213,7 +233,6 @@ class StrangleStrategy:
                 self.state['is_adjusting'] = True
                 self.state['adjustment_count'] += 1
                 self.state_manager.save_state(self.strategy_name, self.mode, self.state)
-                # Run the adjustment in a separate thread to avoid blocking the WebSocket
                 adj_thread = threading.Thread(target=self._perform_adjustment, args=(smaller_leg, larger_price), daemon=True)
                 adj_thread.start()
             else:
@@ -222,7 +241,6 @@ class StrangleStrategy:
 
     def _perform_adjustment(self, losing_leg_type: str, target_premium: float):
         losing_leg_info = self.state['active_legs'][losing_leg_type]
-        self._manage_subscriptions(unsubscribe_list=[{"exchange": self.config['exchange'], "symbol": losing_leg_info['symbol']}])
         self._square_off_leg(losing_leg_type, losing_leg_info, is_adjustment=True)
 
         remaining_leg_type = 'PUT_SHORT' if losing_leg_type == 'CALL_SHORT' else 'CALL_SHORT'
@@ -242,7 +260,12 @@ class StrangleStrategy:
             return
 
         self._place_leg_order(losing_leg_type, new_leg_info['symbol'], new_leg_info['strike'], "SELL", is_adjustment=True)
-        self._manage_subscriptions(subscribe_list=[{"exchange": self.config['exchange'], "symbol": new_leg_info['symbol']}])
+
+        sub_message = {
+            'unsubscribe': [{"exchange": self.config['exchange'], "symbol": losing_leg_info['symbol']}],
+            'subscribe': [{"exchange": self.config['exchange'], "symbol": new_leg_info['symbol']}]
+        }
+        self.subscription_queue.put(sub_message)
 
         self.state['is_adjusting'] = False
         self.state_manager.save_state(self.strategy_name, self.mode, self.state)
