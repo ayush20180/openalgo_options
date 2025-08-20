@@ -52,8 +52,17 @@ class StrangleStrategy:
         )
 
         self.live_prices = {}
+        self.tick_queue = queue.Queue()
         self._sym_rx = re.compile(r"^[A-Z]+(\d{2}[A-Z]{3}\d{2})(\d+)(CE|PE)$")
         self.logger.info("Strategy initialized", extra={'event': 'INFO'})
+
+    def _on_tick(self, data):
+        """This function is called by the WebSocketManager's thread.
+        It should be very fast and simply put the tick data onto a queue."""
+        try:
+            self.tick_queue.put(data)
+        except Exception as e:
+            self.logger.error(f"Error in _on_tick: {e}", exc_info=True)
 
     def _load_config(self):
         with open(self.config_path, 'r') as f:
@@ -96,7 +105,6 @@ class StrangleStrategy:
         self.logger.info("Run - Checkpoint 5: Timezone set", extra={'event': 'DEBUG'})
 
         while True:
-            self.logger.info(f"HEARTBEAT: is_adjusting={self.state.get('is_adjusting')}, live_prices={len(self.live_prices)}, active_legs={self.state.get('active_legs')}", extra={'event': 'DEBUG'})
             now_ist = datetime.now(ist).time()
 
             if now_ist < start_time:
@@ -106,19 +114,45 @@ class StrangleStrategy:
                     time.sleep(wait_seconds)
                 continue
 
-            if start_time <= now_ist < end_time:
-                if not self.state.get('active_trade_id'):
-                    self.execute_entry()
-                    if self.state.get('active_legs'):
-                        symbols = [leg['symbol'] for leg in self.state['active_legs'].values()]
-                        symbols.append(self.config['index'])
-                        instrument_list = [{"exchange": "NSE_INDEX" if s == self.config['index'] else self.config['exchange'], "symbol": s} for s in symbols]
-                        self.ws_manager.connect(instrument_list)
-
-                time.sleep(1)
-                continue
-
             if now_ist >= end_time:
+                self.logger.info("Run - Checkpoint 10: After trading window", extra={'event': 'DEBUG'})
+                self.execute_exit()
+                break
+
+            # --- Main Strategy Logic Loop ---
+
+            # 1. Process all ticks in the queue
+            while not self.tick_queue.empty():
+                try:
+                    data = self.tick_queue.get_nowait()
+                    symbol = data.get('symbol')
+                    ltp = data.get('data', {}).get('ltp')
+                    if symbol and ltp is not None:
+                        self.live_prices[symbol] = ltp
+                except queue.Empty:
+                    break # Should not happen due to the while condition, but good practice
+
+            # 2. Check if we need to enter a new trade
+            if not self.state.get('active_trade_id'):
+                self.execute_entry()
+                if self.state.get('active_legs'):
+                    symbols = [leg['symbol'] for leg in self.state['active_legs'].values()]
+                    symbols.append(self.config['index'])
+                    instrument_list = [{"exchange": "NSE_INDEX" if s == self.config['index'] else self.config['exchange'], "symbol": s} for s in symbols]
+                    self.ws_manager.connect(instrument_list)
+
+            # 3. If in a trade, monitor and adjust
+            if self.state.get('active_trade_id') and not self.state.get('is_adjusting'):
+                self.monitor_and_adjust()
+
+            # 4. If an adjustment has just completed, reset the flag
+            if self.state.get('is_adjusting'):
+                self.logger.info("DIAGNOSTIC: Adjustment process complete. Resetting 'is_adjusting' flag.")
+                self.state['is_adjusting'] = False
+                self.state_manager.save_state(self.strategy_name, self.mode, self.state)
+
+            time.sleep(self.config.get('main_loop_sleep_interval', 1))
+            continue
                 self.logger.info("Run - Checkpoint 10: After trading window", extra={'event': 'DEBUG'})
                 self.execute_exit()
                 break
@@ -156,32 +190,12 @@ class StrangleStrategy:
             self.logger.error(f"Error during entry: {e}", extra={'event': 'ERROR'}, exc_info=True)
 
     def _on_tick(self, data):
-        self.logger.info("--- _on_tick START ---", extra={'event': 'DEBUG'})
+        """This function is called by the WebSocketManager's thread.
+        It should be very fast and simply put the tick data onto a queue."""
         try:
-            self.logger.info(f"Tick received: {data}", extra={'event': 'DEBUG'})
-            symbol = data.get('symbol')
-            ltp = data.get('data', {}).get('ltp')
-            self.logger.info(f"Extracted symbol: {symbol}, ltp: {ltp}", extra={'event': 'DEBUG'})
-
-            if symbol and ltp is not None:
-                self.logger.info("Symbol and LTP are valid, updating live_prices.", extra={'event': 'DEBUG'})
-                self.live_prices[symbol] = ltp
-
-                is_adjusting = self.state.get('is_adjusting')
-                self.logger.info(f"Checking 'is_adjusting' flag. Value: {is_adjusting}", extra={'event': 'DEBUG'})
-
-                if not is_adjusting:
-                    self.logger.info("'is_adjusting' is False, calling monitor_and_adjust.", extra={'event': 'DEBUG'})
-                    self.monitor_and_adjust()
-                else:
-                    self.logger.info("'is_adjusting' is True, skipping monitor_and_adjust.", extra={'event': 'DEBUG'})
-            else:
-                self.logger.warning("Symbol or LTP is None, skipping processing.", extra={'event': 'DEBUG'})
-
+            self.tick_queue.put(data)
         except Exception as e:
-            self.logger.error(f"Error processing tick: {data} | Error: {e}", extra={'event': 'ERROR'})
-        finally:
-            self.logger.info("--- _on_tick END ---", extra={'event': 'DEBUG'})
+            self.logger.error(f"Error in _on_tick when putting to queue: {e}", exc_info=True)
 
 
     def monitor_and_adjust(self):
@@ -229,58 +243,52 @@ class StrangleStrategy:
                 self.state['is_adjusting'] = True
                 self.state['adjustment_count'] += 1
                 self.state_manager.save_state(self.strategy_name, self.mode, self.state)
-                adj_thread = threading.Thread(target=self._perform_adjustment, args=(smaller_leg, larger_price), daemon=True)
-                adj_thread.start()
+                # Call adjustment logic directly and synchronously
+                self._perform_adjustment(smaller_leg, larger_price)
             else:
                 self.logger.warning(f"Max adjustments reached. Squaring off position.", extra={'event': 'EXIT'})
                 self.execute_exit("Max adjustments reached")
 
     def _perform_adjustment(self, losing_leg_type: str, target_premium: float):
     def _perform_adjustment(self, losing_leg_type: str, target_premium: float):
-        try:
-            self.logger.info(f"Performing adjustment for {losing_leg_type}", extra={'event': 'DEBUG'})
-            losing_leg_info = self.state['active_legs'][losing_leg_type].copy()
-            self._square_off_leg(losing_leg_type, losing_leg_info, is_adjustment=True)
+        self.logger.info(f"Performing adjustment for {losing_leg_type}", extra={'event': 'DEBUG'})
+        losing_leg_info = self.state['active_legs'][losing_leg_type].copy()
+        self._square_off_leg(losing_leg_type, losing_leg_info, is_adjustment=True)
 
-            remaining_leg_type = 'PUT_SHORT' if losing_leg_type == 'CALL_SHORT' else 'CALL_SHORT'
+        remaining_leg_type = 'PUT_SHORT' if losing_leg_type == 'CALL_SHORT' else 'CALL_SHORT'
 
-            if remaining_leg_type not in self.state['active_legs']:
-                self.logger.error(f"Remaining leg {remaining_leg_type} not found after squaring off. Exiting.", extra={'event': 'ERROR'})
-                self.execute_exit("Remaining leg missing post-adjustment")
-                return
+        if remaining_leg_type not in self.state['active_legs']:
+            self.logger.error(f"Remaining leg {remaining_leg_type} not found after squaring off. Exiting.", extra={'event': 'ERROR'})
+            self.execute_exit("Remaining leg missing post-adjustment")
+            return
 
-            remaining_leg_strike = self.state['active_legs'][remaining_leg_type]['strike']
+        remaining_leg_strike = self.state['active_legs'][remaining_leg_type]['strike']
 
-            new_leg_info = asyncio.run(self._find_new_leg(losing_leg_type, target_premium, losing_leg_info['strike']))
-            if not new_leg_info:
-                self.logger.error("Failed to find new leg. Exiting trade.", extra={'event': 'ERROR'})
-                self.execute_exit("Failed to find adjustment leg")
-                return
+        new_leg_info = asyncio.run(self._find_new_leg(losing_leg_type, target_premium, strike_to_exclude=losing_leg_info['strike']))
+        if not new_leg_info:
+            self.logger.error("Failed to find new leg. Exiting trade.", extra={'event': 'ERROR'})
+            self.execute_exit("Failed to find adjustment leg")
+            return
 
-            new_strike = new_leg_info['strike']
-            if (losing_leg_type == 'PUT_SHORT' and remaining_leg_strike < new_strike) or \
-               (losing_leg_type == 'CALL_SHORT' and new_strike < remaining_leg_strike):
-                self.logger.error("Inverted strangle condition met. Exiting trade.", extra={'event': 'ERROR'})
-                self.execute_exit("Inverted strangle condition")
-                return
+        new_strike = new_leg_info['strike']
+        if (losing_leg_type == 'PUT_SHORT' and remaining_leg_strike < new_strike) or \
+           (losing_leg_type == 'CALL_SHORT' and new_strike < remaining_leg_strike):
+            self.logger.error("Inverted strangle condition met. Exiting trade.", extra={'event': 'ERROR'})
+            self.execute_exit("Inverted strangle condition")
+            return
 
-            self._place_leg_order(losing_leg_type, new_leg_info['symbol'], new_leg_info['strike'], "SELL", is_adjustment=True)
+        self._place_leg_order(losing_leg_type, new_leg_info['symbol'], new_leg_info['strike'], "SELL", is_adjustment=True)
 
-            self.logger.info("DIAGNOSTIC: Adjustment complete. Commanding WebSocketManager to reconnect.", extra={'event': 'DEBUG'})
+        self.logger.info("DIAGNOSTIC: Adjustment complete. Commanding WebSocketManager to reconnect.", extra={'event': 'DEBUG'})
 
-            # Command the manager to reconnect. The manager will handle blocking and thread safety.
-            symbols = [leg['symbol'] for leg in self.state['active_legs'].values()]
-            symbols.append(self.config['index'])
-            instrument_list = [{"exchange": "NSE_INDEX" if s == self.config['index'] else self.config['exchange'], "symbol": s} for s in symbols]
-            self.ws_manager.reconnect(instrument_list)
+        # Command the manager to reconnect. The manager will handle blocking and thread safety.
+        symbols = [leg['symbol'] for leg in self.state['active_legs'].values()]
+        symbols.append(self.config['index'])
+        instrument_list = [{"exchange": "NSE_INDEX" if s == self.config['index'] else self.config['exchange'], "symbol": s} for s in symbols]
+        self.ws_manager.reconnect(instrument_list)
 
-            self.logger.info("DIAGNOSTIC: Reconnect command sent. Adjustment thread finishing.", extra={'event': 'DEBUG'})
-
-        finally:
-            # This block guarantees that is_adjusting is always reset, even if errors occur.
-            self.logger.info("DIAGNOSTIC: Resetting 'is_adjusting' flag to False.", extra={'event': 'DEBUG'})
-            self.state['is_adjusting'] = False
-            self.state_manager.save_state(self.strategy_name, self.mode, self.state)
+        self.logger.info("DIAGNOSTIC: Reconnect command sent. Main loop will now reset is_adjusting flag.", extra={'event': 'DEBUG'})
+        # The 'is_adjusting' flag is now reset in the main run() loop after this synchronous call returns.
 
     async def _find_new_leg(self, option_type: str, target_premium: float, strike_to_exclude: int = None):
         ot = "CE" if "CALL" in option_type else "PE"
