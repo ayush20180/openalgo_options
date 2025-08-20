@@ -237,54 +237,55 @@ class StrangleStrategy:
                 self.execute_exit("Max adjustments reached")
 
     def _perform_adjustment(self, losing_leg_type: str, target_premium: float):
-        self.logger.info(f"Performing adjustment for {losing_leg_type}", extra={'event': 'DEBUG'})
-        losing_leg_info = self.state['active_legs'][losing_leg_type].copy()
-        self._square_off_leg(losing_leg_type, losing_leg_info, is_adjustment=True)
+        try:
+            self.logger.info(f"Performing adjustment for {losing_leg_type}", extra={'event': 'DEBUG'})
+            losing_leg_info = self.state['active_legs'][losing_leg_type].copy()
+            self._square_off_leg(losing_leg_type, losing_leg_info, is_adjustment=True)
 
-        remaining_leg_type = 'PUT_SHORT' if losing_leg_type == 'CALL_SHORT' else 'CALL_SHORT'
+            remaining_leg_type = 'PUT_SHORT' if losing_leg_type == 'CALL_SHORT' else 'CALL_SHORT'
 
-        if remaining_leg_type not in self.state['active_legs']:
-            self.logger.error(f"Remaining leg {remaining_leg_type} not found after squaring off. Exiting.", extra={'event': 'ERROR'})
-            self.execute_exit("Remaining leg missing post-adjustment")
+            if remaining_leg_type not in self.state['active_legs']:
+                self.logger.error(f"Remaining leg {remaining_leg_type} not found after squaring off. Exiting.", extra={'event': 'ERROR'})
+                self.execute_exit("Remaining leg missing post-adjustment")
+                return
+
+            remaining_leg_strike = self.state['active_legs'][remaining_leg_type]['strike']
+
+            new_leg_info = asyncio.run(self._find_new_leg(losing_leg_type, target_premium, losing_leg_info['strike']))
+            if not new_leg_info:
+                self.logger.error("Failed to find new leg. Exiting trade.", extra={'event': 'ERROR'})
+                self.execute_exit("Failed to find adjustment leg")
+                return
+
+            new_strike = new_leg_info['strike']
+            if (losing_leg_type == 'PUT_SHORT' and remaining_leg_strike < new_strike) or \
+               (losing_leg_type == 'CALL_SHORT' and new_strike < remaining_leg_strike):
+                self.logger.error("Inverted strangle condition met. Exiting trade.", extra={'event': 'ERROR'})
+                self.execute_exit("Inverted strangle condition")
+                return
+
+            self._place_leg_order(losing_leg_type, new_leg_info['symbol'], new_leg_info['strike'], "SELL", is_adjustment=True)
+
+            self.logger.info("DIAGNOSTIC: Adjustment complete. Commanding WebSocketManager to reconnect.", extra={'event': 'DEBUG'})
+
+            # Command the manager to reconnect, and wait for it to complete.
+            reconnect_event = threading.Event()
+            self.logger.info("DIAGNOSTIC: Adjustment thread waiting for reconnect to complete...", extra={'event': 'DEBUG'})
+
+            symbols = [leg['symbol'] for leg in self.state['active_legs'].values()]
+            symbols.append(self.config['index'])
+            instrument_list = [{"exchange": "NSE_INDEX" if s == self.config['index'] else self.config['exchange'], "symbol": s} for s in symbols]
+            self.ws_manager.reconnect(instrument_list, event=reconnect_event)
+
+            reconnect_event.wait(timeout=30) # Wait for up to 30 seconds for reconnect
+
+            self.logger.info("DIAGNOSTIC: Reconnect complete, adjustment thread resuming.", extra={'event': 'DEBUG'})
+
+        finally:
+            # This block guarantees that is_adjusting is always reset, even if errors occur.
+            self.logger.info("DIAGNOSTIC: Resetting 'is_adjusting' flag to False.", extra={'event': 'DEBUG'})
             self.state['is_adjusting'] = False
             self.state_manager.save_state(self.strategy_name, self.mode, self.state)
-            return
-
-        remaining_leg_strike = self.state['active_legs'][remaining_leg_type]['strike']
-
-        new_leg_info = asyncio.run(self._find_new_leg(losing_leg_type, target_premium, losing_leg_info['strike']))
-        if not new_leg_info:
-            self.logger.error("Failed to find new leg. Exiting trade.", extra={'event': 'ERROR'})
-            self.execute_exit("Failed to find adjustment leg")
-            self.state['is_adjusting'] = False
-            self.state_manager.save_state(self.strategy_name, self.mode, self.state)
-            return
-
-        new_strike = new_leg_info['strike']
-        if (losing_leg_type == 'PUT_SHORT' and remaining_leg_strike < new_strike) or \
-           (losing_leg_type == 'CALL_SHORT' and new_strike < remaining_leg_strike):
-            self.logger.error("Inverted strangle condition met. Exiting trade.", extra={'event': 'ERROR'})
-            self.execute_exit("Inverted strangle condition")
-            return
-
-        self._place_leg_order(losing_leg_type, new_leg_info['symbol'], new_leg_info['strike'], "SELL", is_adjustment=True)
-
-        self.logger.info("DIAGNOSTIC: Adjustment complete. Commanding WebSocketManager to reconnect.", extra={'event': 'WEBSOCKET'})
-
-        # Command the manager to reconnect, and wait for it to complete.
-        reconnect_event = threading.Event()
-        self.logger.info("DIAGNOSTIC: Adjustment thread waiting for reconnect to complete...", extra={'event': 'DEBUG'})
-
-        symbols = [leg['symbol'] for leg in self.state['active_legs'].values()]
-        symbols.append(self.config['index'])
-        instrument_list = [{"exchange": "NSE_INDEX" if s == self.config['index'] else self.config['exchange'], "symbol": s} for s in symbols]
-        self.ws_manager.reconnect(instrument_list, event=reconnect_event)
-
-        reconnect_event.wait(timeout=30) # Wait for up to 30 seconds for reconnect
-
-        self.logger.info("DIAGNOSTIC: Reconnect complete, adjustment thread resuming.", extra={'event': 'DEBUG'})
-        self.state['is_adjusting'] = False
-        self.state_manager.save_state(self.strategy_name, self.mode, self.state)
 
     async def _find_new_leg(self, option_type: str, target_premium: float, strike_to_exclude: int):
         ot = "CE" if "CALL" in option_type else "PE"
