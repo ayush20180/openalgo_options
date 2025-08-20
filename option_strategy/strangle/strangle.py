@@ -53,6 +53,7 @@ class StrangleStrategy:
 
         self.live_prices = {}
         self.tick_queue = queue.Queue()
+        self.is_running = True
         self._sym_rx = re.compile(r"^[A-Z]+(\d{2}[A-Z]{3}\d{2})(\d+)(CE|PE)$")
         self.logger.info("Strategy initialized", extra={'event': 'INFO'})
 
@@ -104,7 +105,7 @@ class StrangleStrategy:
         ist = pytz.timezone("Asia/Kolkata")
         self.logger.info("Run - Checkpoint 5: Timezone set", extra={'event': 'DEBUG'})
 
-        while True:
+        while self.is_running:
             now_ist = datetime.now(ist).time()
 
             if now_ist < start_time:
@@ -279,7 +280,8 @@ class StrangleStrategy:
 
         self._place_leg_order(losing_leg_type, new_leg_info['symbol'], new_leg_info['strike'], "SELL", is_adjustment=True)
 
-        self.logger.info("DIAGNOSTIC: Adjustment complete. Commanding WebSocketManager to reconnect.", extra={'event': 'DEBUG'})
+        self.logger.info("DIAGNOSTIC: Adjustment complete. Clearing stale prices and commanding WebSocketManager to reconnect.", extra={'event': 'DEBUG'})
+        self.live_prices.clear()
 
         # Command the manager to reconnect. The manager will handle blocking and thread safety.
         symbols = [leg['symbol'] for leg in self.state['active_legs'].values()]
@@ -345,6 +347,7 @@ class StrangleStrategy:
             self._square_off_leg(leg_type, leg_info, is_adjustment=False)
         self.state = {}
         self.state_manager.save_state(self.strategy_name, self.mode, self.state)
+        self.is_running = False
 
     def shutdown(self, reason="Manual shutdown"):
         self.logger.info(f"Shutdown initiated. Reason: {reason}", extra={'event': 'SHUTDOWN'})
