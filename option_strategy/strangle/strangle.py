@@ -57,14 +57,6 @@ class StrangleStrategy:
         self._sym_rx = re.compile(r"^[A-Z]+(\d{2}[A-Z]{3}\d{2})(\d+)(CE|PE)$")
         self.logger.info("Strategy initialized", extra={'event': 'INFO'})
 
-    def _on_tick(self, data):
-        """This function is called by the WebSocketManager's thread.
-        It should be very fast and simply put the tick data onto a queue."""
-        try:
-            self.tick_queue.put(data)
-        except Exception as e:
-            self.logger.error(f"Error in _on_tick: {e}", exc_info=True)
-
     def _load_config(self):
         with open(self.config_path, 'r') as f:
             self.config = json.load(f)
@@ -137,17 +129,10 @@ class StrangleStrategy:
             if not self.state.get('active_trade_id'):
                 self.execute_entry()
                 if self.state.get('active_legs'):
-                    leg_symbols = [leg['symbol'] for leg in self.state['active_legs'].values()]
-
-                    # Connect WebSocket to all required symbols
-                    symbols_to_subscribe = leg_symbols + [self.config['index']]
-                    instrument_list = [{"exchange": "NSE_INDEX" if s == self.config['index'] else self.config['exchange'], "symbol": s} for s in symbols_to_subscribe]
+                    symbols = [leg['symbol'] for leg in self.state['active_legs'].values()]
+                    symbols.append(self.config['index'])
+                    instrument_list = [{"exchange": "NSE_INDEX" if s == self.config['index'] else self.config['exchange'], "symbol": s} for s in symbols]
                     self.ws_manager.connect(instrument_list)
-
-                    # Wait for prices to be available for both legs before proceeding
-                    if not self._wait_for_all_prices(leg_symbols):
-                        self.execute_exit("Failed to receive initial prices for all legs.")
-                        continue # Stop this iteration; execute_exit will stop the run loop.
 
             # 3. If in a trade, monitor and adjust
             if self.state.get('active_trade_id') and not self.state.get('is_adjusting'):
@@ -197,6 +182,7 @@ class StrangleStrategy:
     def _on_tick(self, data):
         """This function is called by the WebSocketManager's thread.
         It should be very fast and simply put the tick data onto a queue."""
+        self.logger.info(f"--- _on_tick CALLED WITH DATA: {data} ---", extra={'event': 'DIAGNOSTIC'})
         try:
             self.tick_queue.put(data)
         except Exception as e:
@@ -283,59 +269,17 @@ class StrangleStrategy:
 
         self._place_leg_order(losing_leg_type, new_leg_info['symbol'], new_leg_info['strike'], "SELL", is_adjustment=True)
 
-        self.logger.info("DIAGNOSTIC: Adjustment complete. Clearing stale prices and reconnecting WebSocket.", extra={'event': 'DEBUG'})
+        self.logger.info("DIAGNOSTIC: Adjustment complete. Clearing stale prices and commanding WebSocketManager to reconnect.", extra={'event': 'DEBUG'})
         self.live_prices.clear()
 
-        # Reconnect WebSocket to the new set of symbols
-        leg_symbols = [leg['symbol'] for leg in self.state['active_legs'].values()]
-        symbols_to_subscribe = leg_symbols + [self.config['index']]
-        instrument_list = [{"exchange": "NSE_INDEX" if s == self.config['index'] else self.config['exchange'], "symbol": s} for s in symbols_to_subscribe]
+        # Command the manager to reconnect. The manager will handle blocking and thread safety.
+        symbols = [leg['symbol'] for leg in self.state['active_legs'].values()]
+        symbols.append(self.config['index'])
+        instrument_list = [{"exchange": "NSE_INDEX" if s == self.config['index'] else self.config['exchange'], "symbol": s} for s in symbols]
         self.ws_manager.reconnect(instrument_list)
 
-        # Wait for prices to be available for the new set of legs
-        if not self._wait_for_all_prices(leg_symbols):
-            self.execute_exit(f"Failed to receive prices for all legs after adjustment.")
-            return # IMPORTANT: Stop further execution in this function
-
-        self.logger.info("DIAGNOSTIC: Reconnect and price sync complete. Main loop will now reset is_adjusting flag.", extra={'event': 'DEBUG'})
+        self.logger.info("DIAGNOSTIC: Reconnect command sent. Main loop will now reset is_adjusting flag.", extra={'event': 'DEBUG'})
         # The 'is_adjusting' flag is now reset in the main run() loop after this synchronous call returns.
-
-    def _wait_for_all_prices(self, required_symbols: list, timeout: int = 20) -> bool:
-        """
-        Waits for a specified duration for prices of all required symbols to be available.
-
-        Args:
-            required_symbols: A list of symbols for which prices are required.
-            timeout: The maximum time to wait in seconds.
-
-        Returns:
-            True if all prices were received within the timeout, False otherwise.
-        """
-        self.logger.info(f"Waiting for prices for symbols: {required_symbols}", extra={'event': 'PRICE_WAIT'})
-        wait_start_time = time.time()
-
-        while time.time() - wait_start_time < timeout:
-            # Process the queue to populate live_prices
-            while not self.tick_queue.empty():
-                try:
-                    data = self.tick_queue.get_nowait()
-                    symbol = data.get('symbol')
-                    ltp = data.get('data', {}).get('ltp')
-                    if symbol and ltp is not None:
-                        self.live_prices[symbol] = ltp
-                except queue.Empty:
-                    break
-
-            # Check if all required symbols have prices
-            if all(symbol in self.live_prices for symbol in required_symbols):
-                self.logger.info(f"All required prices received: { {s: self.live_prices.get(s) for s in required_symbols} }", extra={'event': 'PRICE_WAIT'})
-                return True
-
-            time.sleep(0.2) # Avoid a tight loop
-
-        missing_symbols = [s for s in required_symbols if s not in self.live_prices]
-        self.logger.error(f"Timeout: Did not receive prices for all required symbols within {timeout}s. Missing: {missing_symbols}", extra={'event': 'ERROR'})
-        return False
 
     async def _find_new_leg(self, option_type: str, target_premium: float, strike_to_exclude: int = None):
         ot = "CE" if "CALL" in option_type else "PE"
