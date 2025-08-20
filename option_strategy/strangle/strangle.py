@@ -154,9 +154,6 @@ class StrangleStrategy:
 
             time.sleep(self.config.get('main_loop_sleep_interval', 1))
             continue
-                self.logger.info("Run - Checkpoint 10: After trading window", extra={'event': 'DEBUG'})
-                self.execute_exit()
-                break
 
 
     def execute_entry(self):
@@ -250,7 +247,6 @@ class StrangleStrategy:
                 self.logger.warning(f"Max adjustments reached. Squaring off position.", extra={'event': 'EXIT'})
                 self.execute_exit("Max adjustments reached")
 
-    def _perform_adjustment(self, losing_leg_type: str, target_premium: float):
     def _perform_adjustment(self, losing_leg_type: str, target_premium: float):
         self.logger.info(f"Performing adjustment for {losing_leg_type}", extra={'event': 'DEBUG'})
         losing_leg_info = self.state['active_legs'][losing_leg_type].copy()
