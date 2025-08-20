@@ -129,9 +129,9 @@ class StrangleStrategy:
             if not self.state.get('active_trade_id'):
                 self.execute_entry()
                 if self.state.get('active_legs'):
-                    symbols = [leg['symbol'] for leg in self.state['active_legs'].values()]
-                    symbols.append(self.config['index'])
-                    instrument_list = [{"exchange": "NSE_INDEX" if s == self.config['index'] else self.config['exchange'], "symbol": s} for s in symbols]
+                    leg_symbols = [leg['symbol'] for leg in self.state['active_legs'].values()]
+                    self.logger.info("EXPERIMENT: Subscribing to options legs ONLY.")
+                    instrument_list = [{"exchange": self.config['exchange'], "symbol": s} for s in leg_symbols]
                     self.ws_manager.connect(instrument_list)
 
             # 3. If in a trade, monitor and adjust
@@ -182,7 +182,6 @@ class StrangleStrategy:
     def _on_tick(self, data):
         """This function is called by the WebSocketManager's thread.
         It should be very fast and simply put the tick data onto a queue."""
-        self.logger.info(f"--- _on_tick CALLED WITH DATA: {data} ---", extra={'event': 'DIAGNOSTIC'})
         try:
             self.tick_queue.put(data)
         except Exception as e:
@@ -273,9 +272,9 @@ class StrangleStrategy:
         self.live_prices.clear()
 
         # Command the manager to reconnect. The manager will handle blocking and thread safety.
-        symbols = [leg['symbol'] for leg in self.state['active_legs'].values()]
-        symbols.append(self.config['index'])
-        instrument_list = [{"exchange": "NSE_INDEX" if s == self.config['index'] else self.config['exchange'], "symbol": s} for s in symbols]
+        leg_symbols = [leg['symbol'] for leg in self.state['active_legs'].values()]
+        self.logger.info("EXPERIMENT: Reconnecting to options legs ONLY.")
+        instrument_list = [{"exchange": self.config['exchange'], "symbol": s} for s in leg_symbols]
         self.ws_manager.reconnect(instrument_list)
 
         self.logger.info("DIAGNOSTIC: Reconnect command sent. Main loop will now reset is_adjusting flag.", extra={'event': 'DEBUG'})
