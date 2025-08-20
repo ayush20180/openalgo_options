@@ -20,6 +20,7 @@ class WebSocketManager:
         self.logger.info("WebSocketManager thread started.", extra={'event': 'WS_MANAGER'})
         while True:
             try:
+                self.logger.info(f"WS_MANAGER_HEARTBEAT: Waiting for command. Callback is {'set' if self.on_tick_callback else 'None'}.", extra={'event': 'DEBUG'})
                 command = self.command_queue.get()
                 action = command.get('action')
                 self.logger.info(f"WS_MANAGER: Received command: {action}", extra={'event': 'WS_MANAGER'})

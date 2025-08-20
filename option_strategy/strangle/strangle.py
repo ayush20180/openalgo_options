@@ -97,6 +97,7 @@ class StrangleStrategy:
         self.logger.info("Run - Checkpoint 5: Timezone set", extra={'event': 'DEBUG'})
 
         while True:
+            self.logger.info(f"HEARTBEAT: is_adjusting={self.state.get('is_adjusting')}, live_prices={len(self.live_prices)}, active_legs={self.state.get('active_legs')}", extra={'event': 'DEBUG'})
             now_ist = datetime.now(ist).time()
 
             if now_ist < start_time:
@@ -161,10 +162,23 @@ class StrangleStrategy:
             self.logger.info(f"Tick received: {data}", extra={'event': 'DEBUG'})
             symbol = data.get('symbol')
             ltp = data.get('data', {}).get('ltp')
+            self.logger.info(f"Extracted symbol: {symbol}, ltp: {ltp}", extra={'event': 'DEBUG'})
+
             if symbol and ltp is not None:
+                self.logger.info("Symbol and LTP are valid, updating live_prices.", extra={'event': 'DEBUG'})
                 self.live_prices[symbol] = ltp
-                if not self.state.get('is_adjusting'):
+
+                is_adjusting = self.state.get('is_adjusting')
+                self.logger.info(f"Checking 'is_adjusting' flag. Value: {is_adjusting}", extra={'event': 'DEBUG'})
+
+                if not is_adjusting:
+                    self.logger.info("'is_adjusting' is False, calling monitor_and_adjust.", extra={'event': 'DEBUG'})
                     self.monitor_and_adjust()
+                else:
+                    self.logger.info("'is_adjusting' is True, skipping monitor_and_adjust.", extra={'event': 'DEBUG'})
+            else:
+                self.logger.warning("Symbol or LTP is None, skipping processing.", extra={'event': 'DEBUG'})
+
         except Exception as e:
             self.logger.error(f"Error processing tick: {data} | Error: {e}", extra={'event': 'ERROR'})
         finally:
