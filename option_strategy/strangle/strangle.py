@@ -50,7 +50,6 @@ class StrangleStrategy:
             on_tick_callback=self._on_tick,
             logger=self.logger
         )
-        self.ws_manager.start()
 
         self.live_prices = {}
         self._sym_rx = re.compile(r"^[A-Z]+(\d{2}[A-Z]{3}\d{2})(\d+)(CE|PE)$")
@@ -237,6 +236,7 @@ class StrangleStrategy:
                 self.execute_exit("Max adjustments reached")
 
     def _perform_adjustment(self, losing_leg_type: str, target_premium: float):
+    def _perform_adjustment(self, losing_leg_type: str, target_premium: float):
         try:
             self.logger.info(f"Performing adjustment for {losing_leg_type}", extra={'event': 'DEBUG'})
             losing_leg_info = self.state['active_legs'][losing_leg_type].copy()
@@ -268,18 +268,13 @@ class StrangleStrategy:
 
             self.logger.info("DIAGNOSTIC: Adjustment complete. Commanding WebSocketManager to reconnect.", extra={'event': 'DEBUG'})
 
-            # Command the manager to reconnect, and wait for it to complete.
-            reconnect_event = threading.Event()
-            self.logger.info("DIAGNOSTIC: Adjustment thread waiting for reconnect to complete...", extra={'event': 'DEBUG'})
-
+            # Command the manager to reconnect. The manager will handle blocking and thread safety.
             symbols = [leg['symbol'] for leg in self.state['active_legs'].values()]
             symbols.append(self.config['index'])
             instrument_list = [{"exchange": "NSE_INDEX" if s == self.config['index'] else self.config['exchange'], "symbol": s} for s in symbols]
-            self.ws_manager.reconnect(instrument_list, event=reconnect_event)
+            self.ws_manager.reconnect(instrument_list)
 
-            reconnect_event.wait(timeout=30) # Wait for up to 30 seconds for reconnect
-
-            self.logger.info("DIAGNOSTIC: Reconnect complete, adjustment thread resuming.", extra={'event': 'DEBUG'})
+            self.logger.info("DIAGNOSTIC: Reconnect command sent. Adjustment thread finishing.", extra={'event': 'DEBUG'})
 
         finally:
             # This block guarantees that is_adjusting is always reset, even if errors occur.
@@ -287,7 +282,7 @@ class StrangleStrategy:
             self.state['is_adjusting'] = False
             self.state_manager.save_state(self.strategy_name, self.mode, self.state)
 
-    async def _find_new_leg(self, option_type: str, target_premium: float, strike_to_exclude: int):
+    async def _find_new_leg(self, option_type: str, target_premium: float, strike_to_exclude: int = None):
         ot = "CE" if "CALL" in option_type else "PE"
         self.logger.info(f"Finding new {ot} leg near premium {target_premium}", extra={'event': 'DEBUG'})
         index_symbol = self.config['index']
@@ -300,9 +295,10 @@ class StrangleStrategy:
         strikes_to_check = [atm_strike + i * strike_interval for i in range(-radius, radius + 1)]
         self.logger.info(f"DIAGNOSTIC: All candidate strikes: {strikes_to_check}", extra={'event': 'DEBUG'})
 
-        # Exclude the strike from the leg that was just closed
-        strikes_to_check = [s for s in strikes_to_check if s != strike_to_exclude]
-        self.logger.info(f"DIAGNOSTIC: Filtered candidate strikes (excluding {strike_to_exclude}): {strikes_to_check}", extra={'event': 'DEBUG'})
+        if strike_to_exclude is not None:
+            # Exclude the strike from the leg that was just closed
+            strikes_to_check = [s for s in strikes_to_check if s != strike_to_exclude]
+            self.logger.info(f"DIAGNOSTIC: Filtered candidate strikes (excluding {strike_to_exclude}): {strikes_to_check}", extra={'event': 'DEBUG'})
 
         active_leg = next(iter(self.state['active_legs'].values()))
         m = self._sym_rx.match(active_leg['symbol'])
