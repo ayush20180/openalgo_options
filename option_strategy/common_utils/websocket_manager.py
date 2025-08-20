@@ -34,6 +34,12 @@ class WebSocketManager:
                     self._disconnect()
                     self._connect()
                     self._subscribe(command.get('subscriptions', []))
+
+                    # Signal completion if an event was passed
+                    event = command.get('event')
+                    if event:
+                        self.logger.info("WS_MANAGER: Signaling completion event.", extra={'event': 'WS_MANAGER'})
+                        event.set()
                 elif action == 'SHUTDOWN':
                     self._disconnect()
                     break
@@ -94,5 +100,5 @@ class WebSocketManager:
     def disconnect(self):
         self.command_queue.put({'action': 'DISCONNECT'})
 
-    def reconnect(self, subscriptions):
-        self.command_queue.put({'action': 'RECONNECT', 'subscriptions': subscriptions})
+    def reconnect(self, subscriptions, event=None):
+        self.command_queue.put({'action': 'RECONNECT', 'subscriptions': subscriptions, 'event': event})
