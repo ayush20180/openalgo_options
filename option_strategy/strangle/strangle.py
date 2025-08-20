@@ -274,7 +274,8 @@ class StrangleStrategy:
             self.execute_exit("Inverted strangle condition")
             return
 
-        self._place_leg_order(losing_leg_type, new_leg_info['symbol'], new_leg_info['strike'], "SELL", is_adjustment=True)
+        new_leg_symbol = new_leg_info['symbol']
+        self._place_leg_order(losing_leg_type, new_leg_symbol, new_leg_info['strike'], "SELL", is_adjustment=True)
 
         self.logger.info("DIAGNOSTIC: Adjustment complete. Clearing stale prices and commanding WebSocketManager to reconnect.", extra={'event': 'DEBUG'})
         self.live_prices.clear()
@@ -285,7 +286,39 @@ class StrangleStrategy:
         instrument_list = [{"exchange": "NSE_INDEX" if s == self.config['index'] else self.config['exchange'], "symbol": s} for s in symbols]
         self.ws_manager.reconnect(instrument_list)
 
-        self.logger.info("DIAGNOSTIC: Reconnect command sent. Main loop will now reset is_adjusting flag.", extra={'event': 'DEBUG'})
+        # --- BEGIN FIX: Wait for the new leg's price to arrive to prevent race condition ---
+        self.logger.info(f"Waiting for first tick of new leg: {new_leg_symbol}", extra={'event': 'ADJUSTMENT'})
+        wait_start_time = time.time()
+        timeout_seconds = 20  # Wait up to 20 seconds for the first price tick of the new leg.
+        price_received = False
+
+        while time.time() - wait_start_time < timeout_seconds:
+            # Process the queue to populate live_prices, same as in the main loop
+            while not self.tick_queue.empty():
+                try:
+                    data = self.tick_queue.get_nowait()
+                    symbol = data.get('symbol')
+                    ltp = data.get('data', {}).get('ltp')
+                    if symbol and ltp is not None:
+                        self.live_prices[symbol] = ltp
+                except queue.Empty:
+                    break # Should not happen, but for safety
+
+            # Check if the price for the new leg has arrived
+            if new_leg_symbol in self.live_prices:
+                self.logger.info(f"First tick for new leg {new_leg_symbol} received. Price: {self.live_prices[new_leg_symbol]}", extra={'event': 'ADJUSTMENT'})
+                price_received = True
+                break
+
+            time.sleep(0.2) # Sleep briefly to avoid a tight loop and yield CPU
+
+        if not price_received:
+            self.logger.error(f"Timeout: Did not receive price for new leg {new_leg_symbol} within {timeout_seconds} seconds. Exiting trade for safety.", extra={'event': 'ERROR'})
+            self.execute_exit(f"Timeout waiting for new leg price ({new_leg_symbol})")
+            return # IMPORTANT: Stop further execution in this function
+        # --- END FIX ---
+
+        self.logger.info("DIAGNOSTIC: Reconnect command sent and price received. Main loop will now reset is_adjusting flag.", extra={'event': 'DEBUG'})
         # The 'is_adjusting' flag is now reset in the main run() loop after this synchronous call returns.
 
     async def _find_new_leg(self, option_type: str, target_premium: float, strike_to_exclude: int = None):
