@@ -156,8 +156,9 @@ class StrangleStrategy:
             self.logger.error(f"Error during entry: {e}", extra={'event': 'ERROR'}, exc_info=True)
 
     def _on_tick(self, data):
-        self.logger.info(f"Tick received: {data}", extra={'event': 'DEBUG'})
+        self.logger.info("--- _on_tick START ---", extra={'event': 'DEBUG'})
         try:
+            self.logger.info(f"Tick received: {data}", extra={'event': 'DEBUG'})
             symbol = data.get('symbol')
             ltp = data.get('data', {}).get('ltp')
             if symbol and ltp is not None:
@@ -166,6 +167,8 @@ class StrangleStrategy:
                     self.monitor_and_adjust()
         except Exception as e:
             self.logger.error(f"Error processing tick: {data} | Error: {e}", extra={'event': 'ERROR'})
+        finally:
+            self.logger.info("--- _on_tick END ---", extra={'event': 'DEBUG'})
 
 
     def monitor_and_adjust(self):
