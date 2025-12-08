@@ -154,18 +154,6 @@ def cancel_all_orders_with_auth(
         executor.submit(async_log_order, 'cancelallorder', original_data, error_response)
         return False, error_response, 500
 
-    # Emit events for each canceled order asynchronously (non-blocking)
-    for orderid in canceled_orders:
-        socketio.start_background_task(
-            socketio.emit,
-            'cancel_order_event',
-            {
-                'status': 'success',
-                'orderid': orderid,
-                'mode': 'live'
-            }
-        )
-
     # Prepare response data
     response_data = {
         'status': 'success',
@@ -174,11 +162,27 @@ def cancel_all_orders_with_auth(
         'message': f'Canceled {len(canceled_orders)} orders. Failed to cancel {len(failed_cancellations)} orders.'
     }
 
+    # Emit single summary event at the end (page refreshes only once)
+    socketio.start_background_task(
+        socketio.emit,
+        'cancel_order_event',
+        {
+            'status': 'success',
+            'orderid': f"{len(canceled_orders)} orders canceled",
+            'mode': 'live',
+            'batch_order': True,
+            'is_last_order': True,
+            'canceled_count': len(canceled_orders),
+            'failed_count': len(failed_cancellations)
+        }
+    )
+
     # Log the action asynchronously
     executor.submit(async_log_order, 'cancelallorder', order_request_data, response_data)
 
     # Send Telegram alert for live mode
-    telegram_alert_service.send_order_alert('cancelallorder', order_data, response_data, order_data.get('apikey'))
+    # Note: Use original_data to get apikey because broker module may overwrite order_data['apikey']
+    telegram_alert_service.send_order_alert('cancelallorder', order_data, response_data, original_data.get('apikey'))
 
     return True, response_data, 200
 
