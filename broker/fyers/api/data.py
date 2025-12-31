@@ -87,40 +87,50 @@ class BrokerData:
 
     def get_quotes(self, symbol: str, exchange: str) -> dict:
         """
-        Get real-time quotes for given symbol
+        Get real-time quotes for given symbol using depth endpoint to include OI
         Args:
             symbol: Trading symbol
             exchange: Exchange (e.g., NSE, BSE)
         Returns:
-            dict: Simplified quote data with required fields
+            dict: Simplified quote data with required fields including OI
         """
         try:
             br_symbol = get_br_symbol(symbol, exchange)
             encoded_symbol = urllib.parse.quote(br_symbol)
-            
-            response = get_api_response(f"/data/quotes?symbols={encoded_symbol}", self.auth_token)
+
+            # Use depth endpoint to get quotes with OI data
+            response = get_api_response(f"/data/depth?symbol={encoded_symbol}&ohlcv_flag=1", self.auth_token)
             logger.debug(f"Fyers quotes API response: {response}")
 
             if response.get('s') != 'ok':
                 error_msg = f"Error from Fyers API: {response.get('message', 'Unknown error')}"
                 logger.error(error_msg)
                 raise Exception(error_msg)
-            
-            quote_data = response.get('d', [{}])[0]
-            v = quote_data.get('v', {})
-            
+
+            depth_data = response.get('d', {}).get(br_symbol, {})
+            if not depth_data:
+                logger.warning(f"No depth data found for {br_symbol} in API response.")
+                raise Exception(f"No quote data available for {exchange}:{symbol}")
+
+            # Get bid/ask from depth data
+            bids = depth_data.get('bids', [])
+            asks = depth_data.get('ask', [])  # Fyers uses 'ask' (singular)
+
+            bid_price = bids[0].get('price', 0) if bids else 0
+            ask_price = asks[0].get('price', 0) if asks else 0
+
             return {
-                'bid': v.get('bid', 0),
-                'ask': v.get('ask', 0),
-                'open': v.get('open_price', 0),
-                'high': v.get('high_price', 0),
-                'low': v.get('low_price', 0),
-                'ltp': v.get('lp', 0),
-                'prev_close': v.get('prev_close_price', 0),
-                'volume': v.get('volume', 0),
-                'oi': int(v.get('oi', 0))
+                'bid': bid_price,
+                'ask': ask_price,
+                'open': depth_data.get('o', 0),
+                'high': depth_data.get('h', 0),
+                'low': depth_data.get('l', 0),
+                'ltp': depth_data.get('ltp', 0),
+                'prev_close': depth_data.get('c', 0),
+                'volume': depth_data.get('v', 0),
+                'oi': int(depth_data.get('oi', 0))
             }
-            
+
         except Exception as e:
             logger.exception(f"Error fetching quotes for {exchange}:{symbol}")
             raise Exception(f"Error fetching quotes: {e}")
@@ -169,7 +179,10 @@ class BrokerData:
 
     def _process_quotes_batch(self, symbols: list) -> list:
         """
-        Process a single batch of symbols (internal method)
+        Process a single batch of symbols using quotes endpoint for accurate bid/ask data.
+        Note: Using /data/quotes instead of /data/depth for bulk requests as depth
+        returns incorrect bid/ask values when fetching multiple symbols.
+
         Args:
             symbols: List of dicts with 'symbol' and 'exchange' keys (max 50)
         Returns:
@@ -207,40 +220,62 @@ class BrokerData:
         symbols_param = ','.join(br_symbols)
         encoded_symbols = urllib.parse.quote(symbols_param)
 
-        # Make API call for this batch
-        response = get_api_response(f"/data/quotes?symbols={encoded_symbols}", self.auth_token)
-        logger.debug(f"Fyers multiquotes API response for batch: {response}")
+        # Fyers bulk depth API has a bug: bids/asks arrays are concatenated across symbols
+        # Solution: Use /data/quotes for bid/ask and /data/depth for OI
 
-        if response.get('s') != 'ok':
-            error_msg = f"Error from Fyers API: {response.get('message', 'Unknown error')}"
-            logger.error(error_msg)
-            raise Exception(error_msg)
+        # 1. Fetch quotes for bid/ask (correct values)
+        quotes_response = get_api_response(f"/data/quotes?symbols={encoded_symbols}", self.auth_token)
+        logger.debug(f"Fyers quotes API response: {quotes_response}")
 
-        # Parse response and build results
+        # 2. Fetch depth for OI (bulk bid/ask is buggy, only use OI)
+        depth_response = get_api_response(f"/data/depth?symbol={encoded_symbols}&ohlcv_flag=1", self.auth_token)
+        logger.debug(f"Fyers depth API response: {depth_response}")
+
+        # Parse quotes response - array format
+        quotes_map = {}
+        if quotes_response.get('s') == 'ok':
+            for quote_item in quotes_response.get('d', []):
+                if quote_item.get('s') == 'ok':
+                    symbol_name = quote_item.get('n', '')
+                    quotes_map[symbol_name] = quote_item.get('v', {})
+        else:
+            logger.warning(f"Quotes API error: {quotes_response.get('message', 'Unknown error')}")
+
+        # Parse depth response - dict format (only for OI)
+        depth_map = {}
+        if depth_response.get('s') == 'ok':
+            depth_map = depth_response.get('d', {})
+        else:
+            logger.warning(f"Depth API error: {depth_response.get('message', 'Unknown error')}")
+
+        # Build results by merging data from both endpoints
         results = []
-        quotes_data = response.get('d', [])
+        for br_symbol in br_symbols:
+            quote = quotes_map.get(br_symbol, {})
+            depth = depth_map.get(br_symbol, {})
 
-        for quote_item in quotes_data:
-            # Get the symbol from quote data
-            br_symbol = quote_item.get('n', '')
-            v = quote_item.get('v', {})
+            # Skip if no data from both endpoints
+            if not quote and not depth:
+                logger.warning(f"No data found for {br_symbol}")
+                continue
 
             # Look up original symbol and exchange
             original = symbol_map.get(br_symbol, {'symbol': br_symbol, 'exchange': 'UNKNOWN'})
 
+            # Merge: bid/ask/OHLC from quotes, OI from depth
             result_item = {
                 'symbol': original['symbol'],
                 'exchange': original['exchange'],
                 'data': {
-                    'bid': v.get('bid', 0),
-                    'ask': v.get('ask', 0),
-                    'open': v.get('open_price', 0),
-                    'high': v.get('high_price', 0),
-                    'low': v.get('low_price', 0),
-                    'ltp': v.get('lp', 0),
-                    'prev_close': v.get('prev_close_price', 0),
-                    'volume': v.get('volume', 0),
-                    'oi': int(v.get('oi', 0))
+                    'bid': quote.get('bid', 0),
+                    'ask': quote.get('ask', 0),
+                    'open': quote.get('open_price', depth.get('o', 0)),
+                    'high': quote.get('high_price', depth.get('h', 0)),
+                    'low': quote.get('low_price', depth.get('l', 0)),
+                    'ltp': quote.get('lp', depth.get('ltp', 0)),
+                    'prev_close': quote.get('prev_close_price', depth.get('c', 0)),
+                    'volume': quote.get('volume', depth.get('v', 0)),
+                    'oi': int(depth.get('oi', 0))
                 }
             }
             results.append(result_item)

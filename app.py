@@ -46,7 +46,9 @@ from blueprints.python_strategy import python_strategy_bp  # Import the python s
 from blueprints.telegram import telegram_bp  # Import the telegram blueprint
 from blueprints.security import security_bp  # Import the security blueprint
 from blueprints.sandbox import sandbox_bp  # Import the sandbox blueprint
+from blueprints.logging import logging_bp  # Import the logging blueprint
 from blueprints.playground import playground_bp  # Import the API playground blueprint
+from blueprints.admin import admin_bp  # Import the admin blueprint
 from services.telegram_bot_service import telegram_bot_service
 from database.telegram_db import get_bot_config
 
@@ -215,6 +217,8 @@ def create_app():
     app.register_blueprint(security_bp)  # Register Security blueprint
     app.register_blueprint(sandbox_bp)  # Register Sandbox blueprint
     app.register_blueprint(playground_bp)  # Register API playground blueprint
+    app.register_blueprint(logging_bp)  # Register Logging blueprint
+    app.register_blueprint(admin_bp)  # Register Admin blueprint
 
 
     # Exempt webhook endpoints from CSRF protection after app initialization
@@ -366,6 +370,10 @@ def setup_environment(app):
         from concurrent.futures import ThreadPoolExecutor, as_completed
         import time
 
+        from database.chart_prefs_db import ensure_chart_prefs_tables_exists
+        from database.market_calendar_db import ensure_market_calendar_tables_exists
+        from database.qty_freeze_db import ensure_qty_freeze_tables_exists
+
         db_init_functions = [
             ('Auth DB', ensure_auth_tables_exists),
             ('User DB', ensure_user_tables_exists),
@@ -379,10 +387,13 @@ def setup_environment(app):
             ('Strategy DB', ensure_strategy_tables_exists),
             ('Sandbox DB', ensure_sandbox_tables_exists),
             ('Action Center DB', ensure_action_center_tables_exists),
+            ('Chart Prefs DB', ensure_chart_prefs_tables_exists),
+            ('Market Calendar DB', ensure_market_calendar_tables_exists),
+            ('Qty Freeze DB', ensure_qty_freeze_tables_exists),
         ]
 
         db_init_start = time.time()
-        with ThreadPoolExecutor(max_workers=12) as executor:
+        with ThreadPoolExecutor(max_workers=15) as executor:
             # Submit all database initialization tasks
             futures = {executor.submit(func): name for name, func in db_init_functions}
 
@@ -478,7 +489,7 @@ with app.app_context():
             symbol_count = cache_result['symbol_cache'].get('symbols_loaded', 0)
             auth_count = cache_result['auth_cache'].get('tokens_loaded', 0)
             if symbol_count > 0 or auth_count > 0:
-                logger.info(f"Cache restoration: {symbol_count} symbols, {auth_count} auth tokens")
+                logger.debug(f"Cache restoration: {symbol_count} symbols, {auth_count} auth tokens")
     except Exception as e:
         logger.debug(f"Cache restoration skipped: {e}")
 

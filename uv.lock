@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.12"
 
 [[package]]
@@ -950,14 +950,14 @@ wheels = [
 
 [[package]]
 name = "marshmallow"
-version = "3.22.0"
+version = "3.26.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "packaging" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/70/40/faa10dc4500bca85f41ca9d8cefab282dd23d0fcc7a9b5fab40691e72e76/marshmallow-3.22.0.tar.gz", hash = "sha256:4972f529104a220bb8637d595aa4c9762afbe7f7a77d82dc58c1615d70c5823e", size = 176836, upload-time = "2024-08-20T16:30:30.929Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/55/79/de6c16cc902f4fc372236926b0ce2ab7845268dcc30fb2fbb7f71b418631/marshmallow-3.26.2.tar.gz", hash = "sha256:bbe2adb5a03e6e3571b573f42527c6fe926e17467833660bebd11593ab8dfd57", size = 222095, upload-time = "2025-12-22T06:53:53.309Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3c/78/c1de55eb3311f2c200a8b91724414b8d6f5ae78891c15d9d936ea43c3dba/marshmallow-3.22.0-py3-none-any.whl", hash = "sha256:71a2dce49ef901c3f97ed296ae5051135fd3febd2bf43afe0ae9a82143a494d9", size = 49334, upload-time = "2024-08-20T16:30:29.351Z" },
+    { url = "https://files.pythonhosted.org/packages/be/2f/5108cb3ee4ba6501748c4908b908e55f42a5b66245b4cfe0c99326e1ef6e/marshmallow-3.26.2-py3-none-any.whl", hash = "sha256:013fa8a3c4c276c24d26d84ce934dc964e2aa794345a0f8c7e5a7191482c8a73", size = 50964, upload-time = "2025-12-22T06:53:51.801Z" },
 ]
 
 [[package]]
@@ -1128,7 +1128,7 @@ wheels = [
 
 [[package]]
 name = "openalgo"
-version = "1.0.43"
+version = "1.0.45"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
@@ -1137,14 +1137,14 @@ dependencies = [
     { name = "pandas" },
     { name = "websocket-client" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/fc/01/d0d994a114babd838ec8431c295b53f0d9fc57933c87d2d88433741fe9bd/openalgo-1.0.43.tar.gz", hash = "sha256:4b334134fcd2e9d00e189648d7d0159118e3a4ed6c04b2f40d0c4af1a4767a6a", size = 111711, upload-time = "2025-11-30T03:43:18.171Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/8d/cc/56369016ca6740dda275e83723ede4b7097d2f46f5ec1358ff87209bd5dc/openalgo-1.0.45.tar.gz", hash = "sha256:adb6793dd749a30ce2271a557c2009ca8249bf1253faeb191c204d8aeeaf61da", size = 112710, upload-time = "2025-12-24T06:51:28.629Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/6b/90/17f9e2fb70446c53f4cff0a91ae8e6bb59bdce9ae68ffc3f25ba41199259/openalgo-1.0.43-py3-none-any.whl", hash = "sha256:e027c481efbadf1b01b5c05eeef85046a73e8f17965a436c8d677bf2b1b93b30", size = 111930, upload-time = "2025-11-30T03:43:16.463Z" },
+    { url = "https://files.pythonhosted.org/packages/56/9f/7cad2a813274213774fe210c2e7f2f0c23986eb3a707c5ed59da385fcc80/openalgo-1.0.45-py3-none-any.whl", hash = "sha256:35f578185174e3789f738184593740f47a158c343c03ce7d4afc7c381960bb22", size = 114262, upload-time = "2025-12-24T06:51:26.145Z" },
 ]
 
 [[package]]
 name = "openalgoui"
-version = "1.0.0.39"
+version = "1.0.0.41"
 source = { editable = "." }
 dependencies = [
     { name = "aniso8601" },
@@ -1364,7 +1364,7 @@ requires-dist = [
     { name = "logzero", specifier = "==1.7.0" },
     { name = "markdown-it-py", specifier = "==3.0.0" },
     { name = "markupsafe", specifier = "==2.1.5" },
-    { name = "marshmallow", specifier = "==3.22.0" },
+    { name = "marshmallow", specifier = "==3.26.2" },
     { name = "matplotlib-inline", specifier = "==0.1.7" },
     { name = "mcp", specifier = "==1.23.0" },
     { name = "mdurl", specifier = "==0.1.2" },
@@ -1373,7 +1373,7 @@ requires-dist = [
     { name = "nest-asyncio", specifier = "==1.6.0" },
     { name = "numba", specifier = "==0.63.0b1" },
     { name = "numpy", specifier = "==2.3.5" },
-    { name = "openalgo", specifier = "==1.0.43" },
+    { name = "openalgo", specifier = "==1.0.45" },
     { name = "ordered-set", specifier = "==4.1.0" },
     { name = "orjson", specifier = "==3.11.3" },
     { name = "packaging", specifier = "==24.1" },
@@ -1431,7 +1431,7 @@ requires-dist = [
     { name = "typing-inspection", specifier = ">=0.4.1" },
     { name = "tzdata", specifier = "==2025.2" },
     { name = "tzlocal", specifier = "==5.2" },
-    { name = "urllib3", specifier = "==2.5.0" },
+    { name = "urllib3", specifier = "==2.6.1" },
     { name = "uvicorn", specifier = "==0.35.0" },
     { name = "wcwidth", specifier = "==0.2.13" },
     { name = "websocket-client", specifier = "==1.8.0" },
@@ -2493,11 +2493,11 @@ wheels = [
 
 [[package]]
 name = "urllib3"
-version = "2.5.0"
+version = "2.6.1"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/15/22/9ee70a2574a4f4599c47dd506532914ce044817c7752a79b6a51286319bc/urllib3-2.5.0.tar.gz", hash = "sha256:3fc47733c7e419d4bc3f6b3dc2b4f890bb743906a30d56ba4a5bfa4bbff92760", size = 393185, upload-time = "2025-06-18T14:07:41.644Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/5e/1d/0f3a93cca1ac5e8287842ed4eebbd0f7a991315089b1a0b01c7788aa7b63/urllib3-2.6.1.tar.gz", hash = "sha256:5379eb6e1aba4088bae84f8242960017ec8d8e3decf30480b3a1abdaa9671a3f", size = 432678, upload-time = "2025-12-08T15:25:26.773Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a7/c2/fe1e52489ae3122415c51f387e221dd0773709bad6c6cdaa599e8a2c5185/urllib3-2.5.0-py3-none-any.whl", hash = "sha256:e6b01673c0fa6a13e374b50871808eb3bf7046c4b125b216f6bf1cc604cff0dc", size = 129795, upload-time = "2025-06-18T14:07:40.39Z" },
+    { url = "https://files.pythonhosted.org/packages/bc/56/190ceb8cb10511b730b564fb1e0293fa468363dbad26145c34928a60cb0c/urllib3-2.6.1-py3-none-any.whl", hash = "sha256:e67d06fe947c36a7ca39f4994b08d73922d40e6cca949907be05efa6fd75110b", size = 131138, upload-time = "2025-12-08T15:25:25.51Z" },
 ]
 
 [[package]]

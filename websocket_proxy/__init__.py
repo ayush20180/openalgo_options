@@ -3,7 +3,9 @@
 import logging
 
 from .server import WebSocketProxy, main as websocket_main
-from .broker_factory import register_adapter, create_broker_adapter
+from .broker_factory import register_adapter, create_broker_adapter, get_pool_stats, cleanup_all_pools
+from .connection_manager import ConnectionPool, SharedZmqPublisher, get_max_symbols_per_websocket, get_max_websocket_connections
+from .base_adapter import MAX_SYMBOLS_PER_WEBSOCKET, MAX_WEBSOCKET_CONNECTIONS, ENABLE_CONNECTION_POOLING
 
 # Set up logger
 logger = logging.getLogger(__name__)
@@ -68,6 +70,9 @@ from broker.motilal.streaming.motilal_adapter import MotilalWebSocketAdapter
 # Import the fivepaisaxts_adapter
 from broker.jainamxts.streaming.jainamxts_adapter import JainamXTSWebSocketAdapter
 
+# Import the samco_adapter
+from broker.samco.streaming.samco_adapter import SamcoWebSocketAdapter
+
 # AliceBlue adapter will be loaded dynamically
 
 # Register adapters
@@ -91,14 +96,31 @@ register_adapter("indmoney", IndmoneyWebSocketAdapter)
 register_adapter("mstock", MstockWebSocketAdapter)
 register_adapter("motilal", MotilalWebSocketAdapter)
 register_adapter("jainamxts", JainamXTSWebSocketAdapter)
+register_adapter("samco", SamcoWebSocketAdapter)
 
 # AliceBlue adapter will be registered dynamically when first used
 
 __all__ = [
+    # Core classes
     'WebSocketProxy',
     'websocket_main',
     'register_adapter',
     'create_broker_adapter',
+
+    # Connection pooling (multi-websocket support)
+    'ConnectionPool',
+    'SharedZmqPublisher',
+    'get_pool_stats',
+    'cleanup_all_pools',
+    'get_max_symbols_per_websocket',
+    'get_max_websocket_connections',
+
+    # Configuration constants
+    'MAX_SYMBOLS_PER_WEBSOCKET',
+    'MAX_WEBSOCKET_CONNECTIONS',
+    'ENABLE_CONNECTION_POOLING',
+
+    # Broker adapters
     'AngelWebSocketAdapter',
     'ZerodhaWebSocketAdapter',
     'DhanWebSocketAdapter',
@@ -120,5 +142,6 @@ __all__ = [
     'IndmoneyWebSocketAdapter',
     'MstockWebSocketAdapter',
     'MotilalWebSocketAdapter',
-    'JainamXTSWebSocketAdapter'
+    'JainamXTSWebSocketAdapter',
+    'SamcoWebSocketAdapter'
 ]
